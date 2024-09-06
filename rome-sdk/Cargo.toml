@@ -1,0 +1,25 @@
+[package]
+name = "rome-sdk"
+description = "The `Sdk` building block to interact with and develop the Rome Software Stack."
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+
+solana-client = { workspace = true }
+solana-sdk = { workspace = true }
+
+rome-solana = { workspace = true }
+rome-utils = { workspace = true }
+rome-geth = { workspace = true }
+rome-evm-client = {workspace = true}
+ethers = { workspace = true }
+
+[dev-dependencies]
+ethers = { workspace = true }

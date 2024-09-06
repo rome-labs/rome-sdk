@@ -1,0 +1,21 @@
+[package]
+name = "rome-solana"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bincode = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true } 
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+solana-client = { workspace = true }
+solana-sdk = { workspace = true }
+solana-transaction-status = { workspace = true }
+solana-geyser-plugin-interface = { workspace = true }
+serde = { workspace = true }
+kafka = { workspace = true }
+url = { workspace = true }
+rome-utils = { workspace = true }
+futures-util = { workspace = true }
