@@ -21,15 +21,15 @@ jobs:
       uses: actions/checkout@master
       with:
         path: rome-sdk
-        repository: rome-protocol/rome-sdk
+        repository: rome-labs/rome-sdk
         ref: ${{env.REF_NAME}}
         token: ${{secrets.GIT_ROLLUP_TOKEN}}
 
-    - name: 'Checkout rome-evm-private reposotory'
+    - name: 'Checkout rome-evm reposotory'
       uses: actions/checkout@master
       with:
         path: rome-evm
-        repository: rome-protocol/rome-evm-private
+        repository: rome-labs/rome-evm
         ref: ${{env.ROME_EVM_REF_NAME}}
         token: ${{secrets.GIT_ROLLUP_TOKEN}}
 
@@ -37,14 +37,14 @@ jobs:
       uses: actions/checkout@master
       with:
         path: rome-scripts
-        repository: rome-protocol/rome-scripts
+        repository: rome-labs/rome-scripts
         token: ${{ secrets.GIT_ROLLUP_TOKEN }}
 
     - name: 'Checkout Rome Program reposotory'
       uses: actions/checkout@master
       with:
         path: rome-rollup-program
-        repository: rome-protocol/rome-rollup-program
+        repository: rome-labs/rome-rollup-program
         token: ${{ secrets.GIT_ROLLUP_TOKEN }}
 
     - name: Install Solana

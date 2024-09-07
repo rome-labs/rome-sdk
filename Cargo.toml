@@ -61,8 +61,8 @@ ripemd = "0.1"
 
 # ethers
 ethers = "2.0.14"
-rome-evm = { path = "../rome-evm-private/program" }
-emulator = { path = "../rome-evm-private/emulator" }
+rome-evm = { path = "../rome-evm/program" }
+emulator = { path = "../rome-evm/emulator" }
 
 [patch.crates-io.aes-gcm-siv]
 git = "https://github.com/RustCrypto/AEADs"
