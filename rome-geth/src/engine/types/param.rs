@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 pub struct ForkchoiceUpdateParams {
     /// list of transactions
     pub transactions: Vec<serde_json::Value>,
+    /// gas prices for transactions
+    pub gas_prices: Vec<u64>,
+    /// gas used for transactions
+    pub gas_used: Vec<u64>,
     /// timestamp
     pub timestamp: String,
     /// Previous randao value

@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use self::claim::EngineClaim;
 use self::config::GethEngineConfig;
 use crate::engine::types::param::{
@@ -12,6 +13,8 @@ use serde_json::{from_value, json};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use anyhow::anyhow;
+use rome_evm_client::indexer::tx_parser::GasReport;
 
 /// Claim to authenticate geth engine.
 pub mod claim;
@@ -106,7 +109,7 @@ impl GethEngine {
 
     pub async fn advance_rollup_state(
         &self,
-        transactions: Vec<Transaction>,
+        transactions: &Vec<(Transaction, GasReport)>,
         timestamp: u64,
     ) -> anyhow::Result<()> {
         // Fetch the latest block hash from geth client
@@ -125,17 +128,41 @@ impl GethEngine {
 
         // Prev randao and suggested fee recipient are set to random values
         let hex_timestamp = format!("0x{:x}", timestamp);
+        
+        let gas_prices: Vec<u64> = transactions
+            .iter()
+            .filter_map(|(tx, _)| tx.gas_price)
+            .map(|price| price.as_u64())
+            .collect();
+
+        let gas_reports: Vec<&GasReport> = transactions
+            .iter()
+            .map(|(_, gas_report)| gas_report)
+            .collect();
+
+        let first_report = gas_reports.first().ok_or(anyhow!("Gas reports are empty"))?;
+        let fee_recipient = first_report.gas_recipient.unwrap_or_default();
+        for report in &gas_reports {
+            if report.gas_recipient.unwrap_or_default() != fee_recipient {
+                return Err(anyhow!("Transactions must have the same fee recipient"))
+            }
+        }
+        
+        let gas_used: Vec<u64> = gas_reports.iter().map(|gas_report| gas_report.gas_value.as_u64()).collect();
+
         let forkchoice_params = ForkchoiceUpdateParams {
             transactions: transactions
                 .iter()
-                .map(|tx| serde_json::Value::from(tx.rlp().to_string()))
+                .map(|(tx, _)| serde_json::Value::from(tx.rlp().to_string()))
                 .collect(),
-            timestamp: hex_timestamp.to_string(),
+            timestamp: hex_timestamp,
             prev_randao: "0xc130d5e63c61c935f6089e61140ca9136172677cf6aa5800dcc1cf0a02152a14"
                 .to_string(),
-            suggested_fee_recipient: "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b".to_string(),
+            suggested_fee_recipient: format!("{:?}", fee_recipient),
             withdrawals: vec![],
             no_tx_pool: true,
+            gas_prices,
+            gas_used: gas_used.clone(),
         };
         let forkchoice_request = vec![
             json!({
@@ -165,6 +192,9 @@ impl GethEngine {
         let execution_payload = payload_res
             .get("executionPayload")
             .expect("Failed to get execution payload");
+        let mut execution_payload = execution_payload.clone();
+        execution_payload["romeGasUsed"] = json!(gas_used);
+
         let new_payload = vec![execution_payload.clone()];
         let send_payload_res = self.send_new_payload(new_payload).await;
 

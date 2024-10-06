@@ -8,14 +8,20 @@ use {
     },
     ethers::types::{
         transaction::eip2718::TypedTransaction, Address, Bloom, Bytes, Log, NameOrAddress,
-        OtherFields, Signature as EthSignature, Transaction, TransactionReceipt,
-        TxHash, H256, U256, U64,
+        OtherFields, Signature as EthSignature, Transaction, TransactionReceipt, TxHash, H256,
+        U256, U64,
     },
     rlp::Rlp,
     solana_program::keccak::hash,
     solana_transaction_status::{option_serializer::OptionSerializer, UiTransactionStatusMeta},
     std::{collections::BTreeMap, ops::Add},
 };
+
+#[derive(Default, Debug, Clone)]
+pub struct GasReport {
+    pub gas_value: U256,
+    pub gas_recipient: Option<Address>,
+}
 
 fn new_transaction(
     transaction_hash: TxHash,
@@ -107,12 +113,14 @@ pub enum TxParser {
         eth_signature: EthSignature,
         logs: Vec<Log>,
         status: Option<u64>,
+        gas_report: GasReport,
     },
     BigTxParser {
         holder_data: Vec<u8>,
         pieces: BTreeMap<usize, usize>, // Ordered collection mapping piece offset to piece length
         logs: Vec<Log>,
         status: Option<u64>,
+        gas_report: GasReport,
     },
 }
 
@@ -126,6 +134,7 @@ impl TxParser {
             eth_signature,
             logs: vec![],
             status: None,
+            gas_report: GasReport::default(),
         })
     }
 
@@ -135,6 +144,7 @@ impl TxParser {
             pieces: BTreeMap::new(),
             logs: vec![],
             status: None,
+            gas_report: GasReport::default(),
         }
     }
 
@@ -183,6 +193,14 @@ impl TxParser {
         *logs = events;
     }
 
+    fn set_gas_report(&mut self, report: GasReport) {
+        let gas_report = match self {
+            TxParser::SmallTxParser { gas_report, .. } => gas_report,
+            TxParser::BigTxParser { gas_report, .. } => gas_report,
+        };
+        *gas_report = report;
+    }
+
     fn set_status(&mut self, evm_status: Option<u64>) {
         let status = match self {
             TxParser::SmallTxParser { status, .. } => status,
@@ -199,14 +217,14 @@ impl TxParser {
         meta: &UiTransactionStatusMeta,
         tx_hash: TxHash,
     ) -> Result<Option<u64>> {
-        let (events, exit_reason) = match &meta.log_messages {
+        let (events, exit_reason, gas_value, gas_recipient) = match &meta.log_messages {
             OptionSerializer::Some(logs) => {
                 let mut parser = LogParser::new();
                 parser.parse(logs)?;
 
-                (parser.events, parser.exit_reason)
+                (parser.events, parser.exit_reason, parser.gas_value, parser.gas_recipient)
             }
-            _ => (vec![], None),
+            _ => (vec![], None, None, None),
         };
 
         let status = if let Some(reason) = exit_reason {
@@ -226,6 +244,10 @@ impl TxParser {
             self.set_logs(events)
         }
 
+        if let Some(gas_value) = gas_value {
+            self.set_gas_report(GasReport{ gas_value, gas_recipient });
+        }
+
         Ok(status)
     }
 
@@ -235,32 +257,36 @@ impl TxParser {
         transaction_index: U64,
         block_hash: H256,
         block_number: U64,
-    ) -> Result<(Transaction, TransactionReceipt)> {
+        block_gas_used: U256,
+    ) -> Result<(Transaction, TransactionReceipt, GasReport)> {
         if !self.is_complete() {
             tracing::warn!("Transaction parser is not complete");
             return Err(InternalError);
         }
 
-        let (tx_request, eth_signature, logs, status) = match self {
+        let (tx_request, eth_signature, logs, status, gas_report) = match self {
             TxParser::SmallTxParser {
                 tx_request,
                 eth_signature,
                 logs,
                 status,
+                gas_report,
             } => (
                 tx_request.clone(),
                 eth_signature.clone(),
                 logs.clone(),
                 status.clone(),
+                gas_report.clone(),
             ),
             TxParser::BigTxParser {
                 holder_data,
                 logs,
                 status,
+                gas_report,
                 ..
             } => {
                 let (tx, e_sig) = decode_transaction_from_rlp(&Rlp::new(&holder_data.as_slice()))?;
-                (tx, e_sig, logs.clone(), status.clone())
+                (tx, e_sig, logs.clone(), status.clone(), gas_report.clone())
             }
         };
 
@@ -283,8 +309,10 @@ impl TxParser {
             block_number: Some(block_number),
             from: transaction.from,
             to: transaction.to,
-            gas_used: Some(U256::from(0)), // TODO gas calculation
-            cumulative_gas_used: U256::from(0),
+            gas_used: Some(gas_report.gas_value),
+            cumulative_gas_used: block_gas_used
+                .checked_add(gas_report.gas_value)
+                .expect("This must never happen - block gas overflow!"),
             contract_address: calc_contract_address(
                 tx_request.to(),
                 tx_request.from(),
@@ -314,10 +342,16 @@ impl TxParser {
             status: status.map(|a| a.into()),
             logs_bloom: Bloom::default(),
             root: None,
-            effective_gas_price: None,
+            effective_gas_price: if let Some(price) = transaction.gas_price {
+                Some(price)
+            } else if let Some(price) = transaction.max_priority_fee_per_gas {
+                Some(price)
+            } else {
+                panic!("No gas_price nor max_priority_fee_per_gas defined")
+            },
             other: OtherFields::default(),
         };
 
-        Ok((transaction, receipt))
+        Ok((transaction, receipt, gas_report))
     }
 }

@@ -338,6 +338,7 @@ impl<'a> BlockParser<'a> {
                         tx_idx,
                         block_hash,
                         block_number,
+                        gas_used,
                     ) {
                         // Update block gas and log index from confirmed transaction
                         log_index = log_index

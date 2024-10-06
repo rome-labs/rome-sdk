@@ -1,5 +1,5 @@
 use {
-    crate::{error::Result, indexer::transaction_storage::TransactionStorage},
+    crate::{error::Result, indexer::{transaction_storage::TransactionStorage, tx_parser::GasReport}},
     ethers::{
         abi::ethereum_types::BigEndianHash,
         types::{
@@ -131,13 +131,17 @@ impl BlockData {
         }
     }
 
-    pub fn get_transactions(&self, transaction_storage: &TransactionStorage) -> Vec<Transaction> {
+    pub fn get_transactions(&self, transaction_storage: &TransactionStorage) -> Vec<(Transaction, GasReport)> {
         self.transactions
             .iter()
             .filter_map(|tx_hash| {
                 transaction_storage
                     .get_transaction(tx_hash)
-                    .map_or(None, |tx| tx.get_transaction().map(|tx| tx.clone()))
+                    .map_or(None, |tx|
+                        tx.get_transaction_with_gas_report().map(
+                            |(tx, gas_report)| (tx.clone(), gas_report.clone())
+                        ),
+                    )
             })
             .collect()
     }
