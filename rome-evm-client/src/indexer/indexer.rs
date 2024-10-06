@@ -107,13 +107,15 @@ impl Indexer {
                 &self.transaction_storage,
             ) {
                 tracing::warn!(
-                    "Unable to parse block from slot {:?}: {:?}. Will retry", current_slot, err,
+                    "Unable to parse block from slot {:?}: {:?}. Will retry",
+                    current_slot,
+                    err,
                 );
                 return current_slot;
             } else {
                 current_slot += 1;
             }
-        };
+        }
 
         to_slot
     }
@@ -125,11 +127,9 @@ impl Indexer {
         block_sender: &BlockSender,
     ) -> Slot {
         loop {
-            from_slot = match self.client.get_slot_with_commitment(
-                CommitmentConfig {
-                    commitment: self.commitment,
-                },
-            ) {
+            from_slot = match self.client.get_slot_with_commitment(CommitmentConfig {
+                commitment: self.commitment,
+            }) {
                 Ok(to_slot) => {
                     if from_slot > to_slot {
                         interval.tick().await;
@@ -140,7 +140,7 @@ impl Indexer {
                     }
 
                     self.process_blocks(from_slot, to_slot, block_sender)
-                },
+                }
                 Err(err) => {
                     tracing::warn!(
                         "Unable to get latest {:?} slot from Solana: {:?}",
@@ -159,16 +159,20 @@ impl Indexer {
         start_slot: Slot,
         interval_ms: u64,
         block_sender: &BlockSender,
-        on_started: T
+        on_started: T,
     ) {
         let duration = tokio::time::Duration::from_millis(interval_ms);
         let mut interval = tokio::time::interval(duration);
         let mut from_slot = start_slot;
 
-        from_slot = self.process_blocks_until_in_sync(from_slot, &mut interval, block_sender).await;
+        from_slot = self
+            .process_blocks_until_in_sync(from_slot, &mut interval, block_sender)
+            .await;
         on_started();
         loop {
-            from_slot = self.process_blocks_until_in_sync(from_slot, &mut interval, block_sender).await;
+            from_slot = self
+                .process_blocks_until_in_sync(from_slot, &mut interval, block_sender)
+                .await;
         }
     }
 }

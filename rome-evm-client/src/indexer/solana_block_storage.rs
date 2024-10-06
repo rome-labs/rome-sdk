@@ -70,7 +70,7 @@ impl SolanaBlockStorage {
                         tracing::warn!("Unable to reload block {:?}", err);
                         Err(InternalError)
                     }
-                }
+                };
             }
         }
     }

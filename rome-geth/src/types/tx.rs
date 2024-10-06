@@ -4,7 +4,7 @@ use ethers::types::{
     Eip2930TransactionRequest, NameOrAddress, TransactionRequest, TxHash, H256, U256, U64,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Channel to send transactions to the mempool
 pub type GethTxPoolSender = tokio::sync::mpsc::UnboundedSender<GethTxPoolTx>;
@@ -58,9 +58,9 @@ pub struct GethTxPoolTx {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GethTxPoolResult {
     /// address to nonce map for pending transactions
-    pub pending: HashMap<String, HashMap<u64, GethTxPoolTx>>,
+    pub pending: HashMap<String, BTreeMap<u64, GethTxPoolTx>>,
     /// address to nonce map for queued transactions
-    pub queued: HashMap<String, HashMap<u64, GethTxPoolTx>>,
+    pub queued: HashMap<String, BTreeMap<u64, GethTxPoolTx>>,
 }
 
 #[derive(Debug)]

@@ -27,13 +27,14 @@ use {
         },
         utils::keccak256,
     },
-    rome_evm::{tx::legacy::Legacy as LegacyTx, H160 as EvmH160},
+    rome_evm::{tx::legacy::Legacy as LegacyTx, H160 as EvmH160, U256 as EvmU256},
     solana_client::rpc_client::RpcClient,
     solana_sdk::{
         clock::Slot,
         commitment_config::CommitmentLevel,
         pubkey::Pubkey,
         signer::{keypair::Keypair, Signer},
+        transaction::Transaction,
     },
     std::{ops::Deref, sync::Arc},
     tokio::select,
@@ -216,7 +217,7 @@ impl RomeEVMClient {
 
     /// Returns current gas price
     pub fn gas_price(&self) -> Result<U256> {
-        let gas_price = 0;
+        let gas_price = 1;
         Ok(gas_price.into())
     }
 
@@ -250,9 +251,15 @@ impl RomeEVMClient {
     /// Estimate gas amount for a given transaction
     ///
     /// * `call` - transaction request to estimate gas
-    pub fn estimate_gas(&self, _call: TransactionRequest) -> Result<U256> {
-        let gas = 21000_u64;
-        Ok(gas.into())
+    pub fn estimate_gas(&self, call: TransactionRequest) -> Result<U256> {
+        let emulation = emulator::eth_estimate_gas(
+            &self.program_id,
+            legacy_tx_from_tx_request(&call),
+            Arc::clone(&self.client),
+        )?;
+        TransactionBuilder::check_revert(&emulation)?;
+
+        Ok(emulation.gas.into())
     }
 
     fn get_block_number(&self, block_number: BlockId) -> Result<Option<U64>> {
@@ -351,6 +358,32 @@ impl RomeEVMClient {
         }
     }
 
+    /// Retrieves the value stored at a specific storage slot for a given address.
+    ///
+    /// * `program_id` - The Pubkey of the program that owns the Ethereum account.
+    /// * `address` - The Ethereum address (EvmH160) to retrieve the storage value from.
+    /// * `slot` - The storage slot index (U256) to retrieve the value from.
+    ///
+    /// The corresponding storage value.
+    // pub fn eth_get_storage_at(
+    //     &self,
+    //     program_id: Pubkey,
+    //     address: EvmH160,
+    //     slot: U256,
+    // ) -> Result<U256> {
+    //     let value = emulator::eth_get_storage_at(
+    //         &self.program_id,
+    //         &EvmH160::from(address.0),
+    //         &slot,
+    //         Arc::clone(&self.client),
+    //     )?;
+
+    //     let mut buf = [0; 32];
+    //     value.to_big_endian(&mut buf);
+
+    //     Ok(U256::from_big_endian(&buf))
+    // }
+
     /// Finds transaction with a given transaction hash and executes <b>processor</b> function
     /// against this transaction
     ///
@@ -365,6 +398,28 @@ impl RomeEVMClient {
         processor: impl FnOnce(&TransactionData) -> Option<Ret>,
     ) -> Result<Option<Ret>> {
         self.indexer.map_tx(tx_hash, processor)
+    }
+
+    /// Retrieves the value stored at a specific storage slot for a given address.
+    ///
+    /// * `address` - The Ethereum address to retrieve the storage value from.
+    /// * `slot` - The storage slot index to retrieve the value from.
+    ///
+    /// The corresponding storage value.
+    pub fn eth_get_storage_at(&self, address: Address, slot: U256) -> Result<U256> {
+        let mut buf = [0u8; 32];
+        slot.to_big_endian(&mut buf);
+        
+        let value = emulator::eth_get_storage_at(
+            &self.program_id,
+            &EvmH160::from(address.0),
+            &EvmU256::from_big_endian(&buf),
+            Arc::clone(&self.client),
+        )?;
+
+        value.to_big_endian(&mut buf);
+
+        Ok(U256::from_big_endian(&buf))
     }
 
     /// Runs emulation of a given transaction request on a latest block with commitment level
@@ -390,5 +445,22 @@ impl RomeEVMClient {
     /// Payer's public key
     pub fn payer_key(&self) -> Pubkey {
         self.payer.pubkey()
+    }
+
+    /// Register operator's gas recipient address in chain
+    ///
+    /// * `address` - Address of the operator to receive the payment for gas
+    pub fn reg_gas_recipient(&self, address: Address) -> Result<()> {
+        let mut data = vec![Instruction::RegSigner as u8];
+        data.extend(address.as_bytes());
+
+        let emulation = self.emulate(Instruction::RegSigner, address.as_bytes())?;
+        let ix = self.tx_builder.build_solana_instr(&emulation, &data);
+
+        let blockhash = self.client.get_latest_blockhash()?;
+
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&self.payer.pubkey()), &[&self.payer], blockhash);
+        let _ = self.client.send_and_confirm_transaction(&tx)?;
+        Ok(())
     }
 }

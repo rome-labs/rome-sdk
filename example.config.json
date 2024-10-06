@@ -1,9 +1,0 @@
-{ 
-    "program_id" : "4T8Tvgk3du12Wz3KNhnz3BpiD362vGMivi2jrQE6wSyR",
-    "payer_path" : "/Users/aniketprajapati/.config/solana/id.json",
-    "rpc_url" : "http://localhost:8899",
-    "commitment" : "confirmed",
-    "rollups" : {
-        "1": "mv3ekLzLbnVPNxjSKvqBpU3ZeZXPQdEC3bp5MDEBG68"
-    }
-}

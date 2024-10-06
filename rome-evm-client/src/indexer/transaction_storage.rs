@@ -125,6 +125,7 @@ impl TransactionStorage {
         transaction_index: usize,
         block_hash: H256,
         block_number: U64,
+        block_gas_used: U256,
     ) -> Result<Option<&TransactionReceipt>> {
         if let Some(tx) = self.transactions.get_mut(tx_hash) {
             tx.try_finalize(
@@ -132,6 +133,7 @@ impl TransactionStorage {
                 U64::from(transaction_index),
                 block_hash,
                 block_number,
+                block_gas_used,
             )?;
             Ok(tx.get_receipt())
         } else {

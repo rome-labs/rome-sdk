@@ -24,3 +24,4 @@ hex = { workspace = true }
 ethnum = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
+rome-evm-client = { workspace = true }

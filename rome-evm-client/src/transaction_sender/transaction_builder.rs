@@ -40,8 +40,7 @@ impl TransactionBuilder {
         }
     }
 
-    pub fn emulate(&self, data: &[u8], payer: &Pubkey) -> Result<Emulation> {
-        let emulation = emulate(&self.program_id, data, payer, self.rpc_client.clone())?;
+    pub fn check_revert(emulation: &Emulation) ->Result<()> {
         if let Some(vm) = emulation.vm.as_ref() {
             if vm.exit_reason.is_revert() {
                 let mes = decode_revert(vm.return_value.as_ref()).unwrap_or_default();
@@ -50,6 +49,11 @@ impl TransactionBuilder {
                 return Err(Revert(mes, data));
             }
         }
+        Ok(())
+    }
+    pub fn emulate(&self, data: &[u8], payer: &Pubkey) -> Result<Emulation> {
+        let emulation = emulate(&self.program_id, data, payer, self.rpc_client.clone())?;
+        Self::check_revert(&emulation)?;
 
         Ok(emulation)
     }

@@ -1,7 +1,7 @@
 use {
     crate::{
         error::Result,
-        indexer::tx_parser::{EVMStatusCode, TxParser},
+        indexer::tx_parser::{EVMStatusCode, TxParser, GasReport},
     },
     ethers::types::{
         transaction::eip2718::TypedTransaction, Signature as EthSignature, Transaction,
@@ -59,6 +59,8 @@ pub struct TransactionData {
 
     // Solana slot number (EVM block number) which contains this transaction
     included_in_slot: Option<Slot>,
+
+    pub gas_report: Option<GasReport>,
 }
 
 impl TransactionData {
@@ -74,6 +76,7 @@ impl TransactionData {
             transaction: None,
             sol_signatures: BTreeSet::new(),
             included_in_slot: None,
+            gas_report: None,
         })
     }
 
@@ -83,6 +86,7 @@ impl TransactionData {
             transaction: None,
             sol_signatures: BTreeSet::new(),
             included_in_slot: None,
+            gas_report: None,
         }
     }
 
@@ -99,11 +103,13 @@ impl TransactionData {
         transaction_index: U64,
         block_hash: H256,
         block_number: U64,
+        block_gas_used: U256,
     ) -> Result<()> {
         let new_state = if let TransactionDataState::Parsing(tx_parser) = &self.state {
-            let (transaction, receipt) =
-                tx_parser.build(log_index, transaction_index, block_hash, block_number)?;
+            let (transaction, receipt, gas_report) =
+                tx_parser.build(log_index, transaction_index, block_hash, block_number, block_gas_used)?;
             self.transaction = Some(transaction);
+            self.gas_report = Some(gas_report);
             TransactionDataState::Completed(receipt)
         } else {
             return Ok(());
@@ -115,6 +121,14 @@ impl TransactionData {
 
     pub fn get_transaction(&self) -> Option<&Transaction> {
         self.transaction.as_ref()
+    }
+
+    pub fn get_transaction_with_gas_report(&self) -> Option<(&Transaction, &GasReport)> {
+        if let (Some(tx), Some(gas_report)) = (self.transaction.as_ref(), self.gas_report.as_ref()) {
+            Some((tx, gas_report))
+        } else {
+            None
+        }
     }
 
     pub fn get_receipt(&self) -> Option<&TransactionReceipt> {

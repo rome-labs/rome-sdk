@@ -1,5 +1,5 @@
 [workspace]
-members = ["rome-sdk", "rome-solana", "rome-utils", "rome-geth", "rome-evm-client"]
+members = ["rome-sdk", "rome-solana", "rome-utils", "rome-geth", "rome-evm-client", "rome-da"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -58,6 +58,8 @@ url = { version = "2.5.2", features = ["serde"] }
 rand = "0.8.5"
 jsonrpsee-core = "0.24.1"
 ripemd = "0.1"
+# Rome da
+sha3 = "0.10.1"
 
 # ethers
 ethers = "2.0.14"

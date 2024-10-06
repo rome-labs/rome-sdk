@@ -2,10 +2,10 @@ use {
     crate::error::{Result, RomeEvmError::LogParserError},
     ethers::{
         abi::{self, ParamType},
-        types::{Address, Log, H256},
+        types::{Address, Log, H256, U256},
         utils::hex,
     },
-    rome_evm::{EVENT_LOG, EXIT_REASON, H160, REVERT_ERROR, REVERT_PANIC},
+    rome_evm::{EVENT_LOG, EXIT_REASON, H160, REVERT_ERROR, REVERT_PANIC, GAS_VALUE, GAS_RECIPIENT},
     std::mem::size_of,
 };
 
@@ -42,6 +42,15 @@ pub enum EventState {
     Data,
 }
 
+#[derive(PartialEq)]
+pub enum GasReportState {
+    Init,
+    GasValue,
+    GasRecipient,
+    GasValueFound,
+    GasRecipientFound
+}
+
 #[derive(Default, Debug)]
 pub struct ExitReason {
     pub code: u8,
@@ -65,6 +74,8 @@ impl ExitReason {
 pub struct LogParser {
     pub events: Vec<Log>,
     pub exit_reason: Option<ExitReason>,
+    pub gas_value: Option<U256>,
+    pub gas_recipient: Option<Address>,
 }
 
 impl LogParser {
@@ -72,6 +83,8 @@ impl LogParser {
         LogParser {
             events: vec![],
             exit_reason: None,
+            gas_value: None,
+            gas_recipient: None,
         }
     }
 
@@ -79,14 +92,25 @@ impl LogParser {
         for log in logs {
             let mut event_parser = EventParser::default();
             let mut reason_parser = ExitReasonParser::default();
+            let mut gas_value_parser = GasValueParser::default();
+            let mut gas_recipient_parser = GasRecipientParser::default();
+
             event_parser.consume(log)?;
             reason_parser.consume(log)?;
+            gas_value_parser.consume(log)?;
+            gas_recipient_parser.consume(log)?;
 
             if event_parser.found() {
                 self.events.push(event_parser.event)
             }
             if reason_parser.found() {
                 self.exit_reason = Some(reason_parser.exit_reason)
+            }
+            if gas_value_parser.found() {
+                self.gas_value = Some(gas_value_parser.gas_value)
+            }
+            if gas_recipient_parser.found() {
+                self.gas_recipient = gas_recipient_parser.recipient
             }
         }
 
@@ -265,4 +289,84 @@ pub fn decode_revert(return_value: Option<&Vec<u8>>) -> Option<String> {
     };
 
     mes
+}
+
+pub struct GasValueParser {
+    pub state: GasReportState,
+    pub gas_value: U256,
+}
+
+impl Default for GasValueParser {
+    fn default() -> Self {
+        Self {
+            state: GasReportState::Init,
+            gas_value: U256::zero(),
+        }
+    }
+}
+
+impl Parser for GasValueParser {
+    fn advance(&mut self, item: Vec<u8>) -> Result<()> {
+        match self.state {
+            GasReportState::Init => {
+                if item == GAS_VALUE {
+                    self.state = GasReportState::GasValue;
+                }
+            }
+            GasReportState::GasValue => {
+                if item.len() != 32 {
+                    return Err(LogParserError(format!("Gas value: U256 expected")));
+                };
+                self.gas_value = U256::from_big_endian(item.as_slice());
+                self.state = GasReportState::GasValueFound;
+            }
+            _ => {},
+        }
+
+        Ok(())
+    }
+
+    fn found(&self) -> bool {
+        self.state == GasReportState::GasValueFound
+    }
+}
+
+pub struct GasRecipientParser {
+    pub state: GasReportState,
+    pub recipient: Option<Address>,
+}
+
+impl Default for GasRecipientParser {
+    fn default() -> Self {
+        Self {
+            state: GasReportState::Init,
+            recipient: None,
+        }
+    }
+}
+
+impl Parser for GasRecipientParser {
+    fn advance(&mut self, item: Vec<u8>) -> Result<()> {
+        match self.state {
+            GasReportState::Init => {
+                if item == GAS_RECIPIENT {
+                    self.state = GasReportState::GasRecipient;
+                }
+            }
+            GasReportState::GasRecipient => {
+                if item.len() != 20 {
+                    return Err(LogParserError(format!("Gas recipient: H160 expected")));
+                };
+                self.recipient = Some(Address::from_slice(item.as_slice()));
+                self.state = GasReportState::GasRecipientFound;
+            }
+            _ => {},
+        }
+
+        Ok(())
+    }
+
+    fn found(&self) -> bool {
+        self.state == GasReportState::GasRecipientFound
+    }
 }
