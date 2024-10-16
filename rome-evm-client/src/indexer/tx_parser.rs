@@ -1,7 +1,7 @@
 use {
     crate::{
         error::{
-            Result,
+            ProgramResult,
             RomeEvmError::{InternalError, TypedTransactionError},
         },
         indexer::log_parser::LogParser,
@@ -45,11 +45,11 @@ fn new_transaction(
         from: *tx_request.from().unwrap_or(&Address::default()),
         gas_price: match tx_request {
             TypedTransaction::Eip1559(_) => None,
-            _ => tx_request.gas_price().clone(),
+            _ => tx_request.gas_price(),
         },
         gas: tx_request.gas().map_or(U256::default(), |v| *v),
         to: tx_request.to().map(|v| match v {
-            NameOrAddress::Address(addr) => addr.clone(),
+            NameOrAddress::Address(addr) => *addr,
             NameOrAddress::Name(_) => Address::default(),
         }),
         value: *tx_request.value().unwrap_or(&U256::default()),
@@ -57,7 +57,7 @@ fn new_transaction(
         v: U64::from(eth_signature.v),
         r: eth_signature.r,
         s: eth_signature.s,
-        access_list: tx_request.access_list().map(|al| al.clone()),
+        access_list: tx_request.access_list().cloned(),
         max_priority_fee_per_gas: match tx_request {
             TypedTransaction::Legacy(_) => None,
             TypedTransaction::Eip2930(_) => None,
@@ -77,7 +77,7 @@ pub fn calc_contract_address(
     to: Option<&NameOrAddress>,
     from: Option<&Address>,
     nonce: Option<&U256>,
-) -> Result<Option<Address>> {
+) -> ProgramResult<Option<Address>> {
     if to.is_some() {
         return Ok(None);
     }
@@ -91,11 +91,11 @@ pub fn calc_contract_address(
     })
     .ok_or_else(|| {
         tracing::error!("from address is expected to be something");
-        return InternalError;
+        InternalError
     })
 }
 
-pub fn decode_transaction_from_rlp(rlp: &Rlp) -> Result<(TypedTransaction, EthSignature)> {
+pub fn decode_transaction_from_rlp(rlp: &Rlp) -> ProgramResult<(TypedTransaction, EthSignature)> {
     TypedTransaction::decode_signed(rlp).map_err(|e| {
         tracing::info!("Unable to decode transaction: {e}");
         TypedTransactionError(e)
@@ -128,7 +128,7 @@ impl TxParser {
     pub fn new_small_tx_parser(
         tx_request: TypedTransaction,
         eth_signature: EthSignature,
-    ) -> Result<Self> {
+    ) -> ProgramResult<Self> {
         Ok(Self::SmallTxParser {
             tx_request,
             eth_signature,
@@ -216,7 +216,7 @@ impl TxParser {
         &mut self,
         meta: &UiTransactionStatusMeta,
         tx_hash: TxHash,
-    ) -> Result<Option<u64>> {
+    ) -> ProgramResult<Option<u64>> {
         let (events, exit_reason, gas_value, gas_recipient) = match &meta.log_messages {
             OptionSerializer::Some(logs) => {
                 let mut parser = LogParser::new();
@@ -258,7 +258,7 @@ impl TxParser {
         block_hash: H256,
         block_number: U64,
         block_gas_used: U256,
-    ) -> Result<(Transaction, TransactionReceipt, GasReport)> {
+    ) -> ProgramResult<(Transaction, TransactionReceipt, GasReport)> {
         if !self.is_complete() {
             tracing::warn!("Transaction parser is not complete");
             return Err(InternalError);
@@ -285,7 +285,7 @@ impl TxParser {
                 gas_report,
                 ..
             } => {
-                let (tx, e_sig) = decode_transaction_from_rlp(&Rlp::new(&holder_data.as_slice()))?;
+                let (tx, e_sig) = decode_transaction_from_rlp(&Rlp::new(holder_data.as_slice()))?;
                 (tx, e_sig, logs.clone(), status.clone(), gas_report.clone())
             }
         };

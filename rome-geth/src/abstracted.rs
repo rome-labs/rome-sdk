@@ -39,7 +39,7 @@ pub async fn subscribe_to_rollup(
 ) -> anyhow::Result<()> {
     let indexer = GethPendingTxsIndexer {
         geth_http_addr: addr,
-        poll_interval_ms: poll_interval_ms,
+        poll_interval_ms,
     };
 
     let service_runner = ServiceRunner::default();

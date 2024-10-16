@@ -1,5 +1,5 @@
 use {
-    crate::{error::Result, indexer::{transaction_storage::TransactionStorage, tx_parser::GasReport}},
+    crate::{indexer::{transaction_storage::TransactionStorage, tx_parser::GasReport}},
     ethers::{
         abi::ethereum_types::BigEndianHash,
         types::{
@@ -7,10 +7,8 @@ use {
         },
     },
     jsonrpsee_core::Serialize,
-    std::{
-        collections::BTreeMap,
-        sync::{Arc, RwLock},
-    },
+    std::{collections::BTreeMap, sync::Arc},
+    tokio::sync::RwLock,
 };
 
 const SHA3_UNCLES: [u8; 32] = [
@@ -110,7 +108,7 @@ impl BlockData {
                     .filter_map(|tx_hash| {
                         transaction_storage
                             .get_transaction(tx_hash)
-                            .map_or(None, |tx| tx.get_transaction().map(|tx| tx.clone()))
+                            .and_then(|tx| tx.get_transaction().cloned())
                     })
                     .collect(),
                 ..self.get_block_base()
@@ -123,7 +121,7 @@ impl BlockData {
                     .filter_map(|tx_hash| {
                         transaction_storage
                             .get_transaction(tx_hash)
-                            .map_or(None, |tx| tx.get_transaction().map(|_| tx_hash.clone()))
+                            .and_then(|tx| tx.get_transaction().map(|_| *tx_hash))
                     })
                     .collect(),
                 ..self.get_block_base()
@@ -147,7 +145,7 @@ impl BlockData {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct EthereumBlockStorage {
     blocks_by_number: Arc<RwLock<BTreeMap<U64, Arc<BlockData>>>>,
     blocks_by_hash: Arc<RwLock<BTreeMap<H256, Arc<BlockData>>>>,
@@ -155,31 +153,30 @@ pub struct EthereumBlockStorage {
 
 impl EthereumBlockStorage {
     pub fn new() -> Self {
-        Self {
-            blocks_by_number: Arc::new(RwLock::new(BTreeMap::new())),
-            blocks_by_hash: Arc::new(RwLock::new(BTreeMap::new())),
-        }
+        Self::default()
     }
 
-    pub fn get_block_by_number(&self, block_number: U64) -> Result<Option<Arc<BlockData>>> {
-        let lock = self.blocks_by_number.read()?;
-        Ok(lock.get(&block_number).map(|e| e.clone()))
+    pub async fn get_block_by_number(&self, block_number: U64) -> Option<Arc<BlockData>> {
+        let lock = self.blocks_by_number.read().await;
+        lock.get(&block_number).cloned()
     }
 
-    pub fn set_block(&self, block_data: Arc<BlockData>) -> Result<()> {
-        let mut lock1 = self.blocks_by_number.write()?;
-        let mut lock2 = self.blocks_by_hash.write()?;
+    pub async fn get_block_by_hash(&self, block_hash: H256) -> Option<Arc<BlockData>> {
+        let lock = self.blocks_by_hash.read().await;
+        lock.get(&block_hash).cloned()
+    }
+
+    pub async fn set_block(&self, block_data: Arc<BlockData>) {
+        let mut lock1 = self.blocks_by_number.write().await;
+        let mut lock2 = self.blocks_by_hash.write().await;
+
         lock1.insert(block_data.number, block_data.clone());
         lock2.insert(block_data.hash, block_data.clone());
-        Ok(())
     }
 
-    pub fn latest_block(&self) -> Result<Option<U64>> {
-        let lock = self.blocks_by_number.read()?;
-        if let Some((block_number, _)) = lock.last_key_value() {
-            return Ok(Some(*block_number));
-        }
+    pub async fn latest_block(&self) -> Option<U64> {
+        let lock = self.blocks_by_number.read().await;
 
-        return Ok(None);
+        lock.last_key_value().map(|(block_number, _)| *block_number)
     }
 }

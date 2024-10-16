@@ -1,0 +1,8 @@
+{ 
+    "payer_path" : "/Users/aniketprajapati/.config/solana/id.json",
+    "rpc_url" : "http://localhost:8899",
+    "commitment" : "confirmed",
+    "rollups" : {
+        "1001": "G2bkjf2HYtQQHN7Bs2UT4YQJ6LsCKxHNRdBrrDzmvH3J"
+    }
+}

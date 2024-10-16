@@ -14,7 +14,9 @@ solana-client = { workspace = true }
 solana-sdk = { workspace = true }
 solana-transaction-status = { workspace = true }
 solana-geyser-plugin-interface = { workspace = true }
+solana-rpc-client-api = {workspace = true}
 serde = { workspace = true }
+serde_json = { workspace = true }
 kafka = { workspace = true }
 url = { workspace = true }
 rome-utils = { workspace = true }

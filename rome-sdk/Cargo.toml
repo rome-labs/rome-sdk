@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+futures = { workspace = true }
 anyhow = { workspace = true }
 
 solana-client = { workspace = true }

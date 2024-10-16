@@ -71,7 +71,7 @@ pub enum PoolTxConversionError {
 fn try_into_legacy(value: &GethTxPoolTx) -> Result<TypedTransaction, PoolTxConversionError> {
     Ok(TypedTransaction::Legacy(TransactionRequest {
         from: Some(value.from),
-        to: value.to.map(|addr| NameOrAddress::Address(addr)),
+        to: value.to.map(NameOrAddress::Address),
         gas: value.gas,
         gas_price: value.gas_price,
         value: value.value,
@@ -85,7 +85,7 @@ fn try_into_eip2930(value: &GethTxPoolTx) -> Result<TypedTransaction, PoolTxConv
     Ok(TypedTransaction::Eip2930(Eip2930TransactionRequest {
         tx: TransactionRequest {
             from: Some(value.from),
-            to: value.to.map(|addr| NameOrAddress::Address(addr)),
+            to: value.to.map(NameOrAddress::Address),
             gas: value.gas,
             gas_price: value.gas_price,
             value: value.value,
@@ -100,7 +100,7 @@ fn try_into_eip2930(value: &GethTxPoolTx) -> Result<TypedTransaction, PoolTxConv
 fn try_into_eip1559(value: &GethTxPoolTx) -> Result<TypedTransaction, PoolTxConversionError> {
     Ok(TypedTransaction::Eip1559(Eip1559TransactionRequest {
         from: Some(value.from),
-        to: value.to.map(|addr| NameOrAddress::Address(addr)),
+        to: value.to.map(NameOrAddress::Address),
         gas: value.gas,
         value: value.value,
         data: value.input.clone(),

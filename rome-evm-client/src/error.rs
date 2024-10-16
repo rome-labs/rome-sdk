@@ -6,7 +6,7 @@ use {
     thiserror::Error,
 };
 
-pub type Result<T> = std::result::Result<T, RomeEvmError>;
+pub type ProgramResult<T> = std::result::Result<T, RomeEvmError>;
 
 #[derive(Debug, Error)]
 pub enum RomeEvmError {

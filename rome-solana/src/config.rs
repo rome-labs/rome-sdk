@@ -7,11 +7,33 @@ use url::Url;
 #[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SolanaConfig {
     /// The RPC URL of the solana node.
-    #[clap(long, default_value_t = Url::from_str("http://localhost:8899").unwrap())]
+    #[clap(long, default_value_t = default_rpc_url())]
+    #[serde(default = "default_rpc_url")]
     pub rpc_url: Url,
     /// The commitment level of the data.
-    #[clap(long, default_value_t = CommitmentLevel::Confirmed)]
+    #[clap(long, default_value_t = default_commitment())]
+    #[serde(default = "default_commitment")]
     pub commitment: CommitmentLevel,
+}
+
+fn default_rpc_url() -> Url {
+    Url::from_str("http://localhost:8899").unwrap()
+}
+
+fn default_commitment() -> CommitmentLevel {
+    CommitmentLevel::Confirmed
+}
+
+impl SolanaConfig {
+    /// Into Sync RPC Client
+    pub fn into_sync_client(self) -> solana_client::rpc_client::RpcClient {
+        self.into()
+    }
+
+    /// Into Async RPC Client
+    pub fn into_async_client(self) -> solana_client::nonblocking::rpc_client::RpcClient {
+        self.into()
+    }
 }
 
 impl Default for SolanaConfig {

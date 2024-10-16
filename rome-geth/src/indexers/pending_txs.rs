@@ -12,15 +12,25 @@ use rome_utils::services::{ConstantPoller, Poller, ServiceRunner};
 /// output channel
 ///
 /// Method used to poll the geth node is `txpool_content`
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GethPendingTxsIndexer {
     /// address of the geth node
-    #[arg(short = 'g', long, default_value = "http://0.0.0.0:8545")]
+    #[arg(short = 'g', long, default_value_t = default_geth_http_addr())]
+    #[serde(default = "default_geth_http_addr")]
     pub geth_http_addr: url::Url,
 
     /// poll interval milliseconds
-    #[arg(short = 'i', long, default_value_t = 100)]
+    #[arg(short = 'i', long, default_value_t = default_poll_interval_ms())]
+    #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+}
+
+fn default_geth_http_addr() -> url::Url {
+    url::Url::parse("http://0.0.0.0:8545").unwrap()
+}
+
+fn default_poll_interval_ms() -> u64 {
+    100
 }
 
 impl GethPendingTxsIndexer {

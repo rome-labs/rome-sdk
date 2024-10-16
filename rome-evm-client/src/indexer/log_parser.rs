@@ -1,16 +1,14 @@
-use {
-    crate::error::{Result, RomeEvmError::LogParserError},
-    ethers::{
-        abi::{self, ParamType},
+use crate::error::{ProgramResult, RomeEvmError::LogParserError};
+use ethers::{
+    abi::{self, ParamType},
         types::{Address, Log, H256, U256},
-        utils::hex,
-    },
-    rome_evm::{EVENT_LOG, EXIT_REASON, H160, REVERT_ERROR, REVERT_PANIC, GAS_VALUE, GAS_RECIPIENT},
-    std::mem::size_of,
+    utils::hex,
 };
+use rome_evm::{EVENT_LOG, EXIT_REASON, H160, REVERT_ERROR, REVERT_PANIC, GAS_VALUE, GAS_RECIPIENT};
+use std::mem::size_of;
 
 pub trait Parser {
-    fn consume(&mut self, log: &String) -> Result<()> {
+    fn consume(&mut self, log: &str) -> ProgramResult<()> {
         if log.starts_with("Program data: ") {
             let (_, log) = log.split_at("Program data: ".len());
             let iter = log.split_whitespace();
@@ -21,7 +19,7 @@ pub trait Parser {
         }
         Ok(())
     }
-    fn advance(&mut self, item: Vec<u8>) -> Result<()>;
+    fn advance(&mut self, item: Vec<u8>) -> ProgramResult<()>;
     fn found(&self) -> bool;
 }
 
@@ -62,7 +60,7 @@ impl ExitReason {
     pub fn log(&self) -> String {
         let mut log = format!("EVM exit_code {}, reason {}", self.code, self.reason);
         if self.reason.starts_with("Revert") {
-            let revert = decode_revert(Some(&self.return_value)).unwrap_or_default();
+            let revert = decode_revert(&self.return_value).unwrap_or_default();
             log = format!("{log}, Revert \"{revert})\"");
         }
 
@@ -88,7 +86,7 @@ impl LogParser {
         }
     }
 
-    pub fn parse(&mut self, logs: &Vec<String>) -> Result<()> {
+    pub fn parse(&mut self, logs: &Vec<String>) -> ProgramResult<()> {
         for log in logs {
             let mut event_parser = EventParser::default();
             let mut reason_parser = ExitReasonParser::default();
@@ -135,7 +133,7 @@ impl Default for EventParser {
 }
 
 impl Parser for EventParser {
-    fn advance(&mut self, item: Vec<u8>) -> Result<()> {
+    fn advance(&mut self, item: Vec<u8>) -> ProgramResult<()> {
         match self.state {
             EventState::Init => {
                 if item == EVENT_LOG {
@@ -144,14 +142,18 @@ impl Parser for EventParser {
             }
             EventState::Address => {
                 if item.len() != size_of::<H160>() {
-                    return Err(LogParserError(format!("event log: address expected")));
+                    return Err(LogParserError(
+                        "event log: address expected".to_string(),
+                    ));
                 };
                 self.event.address = Address::from_slice(&item);
                 self.state = EventState::TopicsLen;
             }
             EventState::TopicsLen => {
                 if item.len() != size_of::<u8>() {
-                    return Err(LogParserError(format!("event log: topics_len expected")));
+                    return Err(LogParserError(
+                        "event log: topics_len expected".to_string(),
+                    ));
                 };
                 self.topics_len = item[0] as usize;
                 if self.topics_len > 0 {
@@ -162,7 +164,9 @@ impl Parser for EventParser {
             }
             EventState::Topics => {
                 if item.len() != size_of::<rome_evm::H256>() {
-                    return Err(LogParserError(format!("event log: topic expected")));
+                    return Err(LogParserError(
+                        "event log: topic expected".to_string(),
+                    ));
                 };
                 self.event.topics.push(H256::from_slice(&item));
                 if self.event.topics.len() == self.topics_len {
@@ -178,10 +182,7 @@ impl Parser for EventParser {
     }
 
     fn found(&self) -> bool {
-        match self.state {
-            EventState::Topics | EventState::Data => true,
-            _ => false,
-        }
+        matches!(self.state, EventState::Topics | EventState::Data)
     }
 }
 
@@ -202,7 +203,7 @@ impl Default for ExitReasonParser {
 }
 
 impl Parser for ExitReasonParser {
-    fn advance(&mut self, item: Vec<u8>) -> Result<()> {
+    fn advance(&mut self, item: Vec<u8>) -> ProgramResult<()> {
         match self.state {
             ExitReasonState::Init => {
                 if item == EXIT_REASON {
@@ -211,16 +212,20 @@ impl Parser for ExitReasonParser {
             }
             ExitReasonState::Code => {
                 if item.len() != size_of::<u8>() {
-                    return Err(LogParserError(format!("exit reason: code expected")));
+                    return Err(LogParserError(
+                        "exit reason: code expected".to_string(),
+                    ));
                 };
                 self.exit_reason.code = item[0];
                 self.state = ExitReasonState::ReasonLen;
             }
             ExitReasonState::ReasonLen => {
                 if item.len() != size_of::<usize>() {
-                    return Err(LogParserError(format!("exit reason: topics_len expected")));
+                    return Err(LogParserError(
+                        "exit reason: topics_len expected".to_string(),
+                    ));
                 };
-                self.reason_len = usize::from_le_bytes(item.as_slice().try_into().unwrap());
+                self.reason_len = usize::from_le_bytes(item.as_slice().try_into().expect("here"));
                 self.state = ExitReasonState::Reason;
             }
             ExitReasonState::Reason => {
@@ -239,42 +244,37 @@ impl Parser for ExitReasonParser {
     }
 
     fn found(&self) -> bool {
-        match self.state {
-            ExitReasonState::Reason | ExitReasonState::ReturnValue => true,
-            _ => false,
-        }
+        matches!(
+            self.state,
+            ExitReasonState::Reason | ExitReasonState::ReturnValue
+        )
     }
 }
 
-pub fn decode_revert(return_value: Option<&Vec<u8>>) -> Option<String> {
-    let return_value = if let Some(value) = return_value {
-        value
-    } else {
+pub fn decode_revert(return_value: &[u8]) -> Option<String> {
+    if return_value.len() < 4 {
+        tracing::warn!("error to decode revert message: return value too short");
         return None;
-    };
+    }
 
-    let mes = if return_value.starts_with(REVERT_ERROR) {
-        let return_value = &return_value[REVERT_ERROR.len()..];
-        match abi::decode(&[ParamType::String], &return_value) {
-            Ok(tokens) => {
-                if let Some(token) = tokens.get(0) {
-                    Some(token.clone().into_string().unwrap_or_default())
-                } else {
-                    None
-                }
-            }
+    let return_reason = &return_value[0..4];
+    let return_value = &return_value[4..];
+
+    match return_reason {
+        REVERT_ERROR => match abi::decode(&[ParamType::String], return_value) {
+            Ok(tokens) => tokens
+                .first()
+                .map(|token| token.clone().into_string().unwrap_or_default()),
             Err(e) => {
                 tracing::warn!("error to decode revert message: {:?}", e);
                 None
             }
-        }
-    } else if return_value.starts_with(REVERT_PANIC) {
-        let return_value = &return_value[REVERT_PANIC.len()..];
-        match abi::decode(&[ParamType::Uint(32)], &return_value) {
+        },
+        REVERT_PANIC => match abi::decode(&[ParamType::Uint(32)], return_value) {
             Ok(tokens) => {
-                if let Some(token) = tokens.get(0) {
+                if let Some(token) = tokens.first() {
                     let value = token.clone().into_uint().unwrap_or_default();
-                    Some(format!("panic {}", value.to_string()))
+                    Some(format!("panic {}", value))
                 } else {
                     None
                 }
@@ -283,12 +283,9 @@ pub fn decode_revert(return_value: Option<&Vec<u8>>) -> Option<String> {
                 tracing::warn!("error to decode revert panic: {:?}", e);
                 None
             }
-        }
-    } else {
-        Some(hex::encode(&return_value))
-    };
-
-    mes
+        },
+        _ => Some(hex::encode(return_value)),
+    }
 }
 
 pub struct GasValueParser {
@@ -306,7 +303,7 @@ impl Default for GasValueParser {
 }
 
 impl Parser for GasValueParser {
-    fn advance(&mut self, item: Vec<u8>) -> Result<()> {
+    fn advance(&mut self, item: Vec<u8>) -> ProgramResult<()> {
         match self.state {
             GasReportState::Init => {
                 if item == GAS_VALUE {
@@ -346,7 +343,7 @@ impl Default for GasRecipientParser {
 }
 
 impl Parser for GasRecipientParser {
-    fn advance(&mut self, item: Vec<u8>) -> Result<()> {
+    fn advance(&mut self, item: Vec<u8>) -> ProgramResult<()> {
         match self.state {
             GasReportState::Init => {
                 if item == GAS_RECIPIENT {

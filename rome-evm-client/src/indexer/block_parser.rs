@@ -1,6 +1,6 @@
 use {
     crate::{
-        error::{Result, RomeEvmError::*},
+        error::{ProgramResult, RomeEvmError::*},
         indexer::{
             ethereum_block_storage::BlockData,
             solana_block_storage::{BlockWithCommitment, SolanaBlockStorage},
@@ -12,17 +12,14 @@ use {
     emulator::instruction::Instruction::*,
     ethers::types::{TxHash, H256, U256, U64},
     rlp::Rlp,
-    rome_evm::api::{
-        do_tx_holder_iterative::args as holder_iterative_args,
-        do_tx_iterative::args as iterative_args,
-    },
+    rome_evm::api::{do_tx_holder, do_tx_holder_iterative, do_tx_iterative, transmit_tx},
     solana_program::instruction::CompiledInstruction,
     solana_sdk::pubkey::Pubkey,
     solana_sdk::{
         hash::Hash as SolanaHash, signature::Signature as SolSignature, slot_history::Slot,
     },
     solana_transaction_status::{UiConfirmedBlock, UiTransactionStatusMeta},
-    std::{mem::size_of, str::FromStr, sync::Arc},
+    std::{str::FromStr, sync::Arc},
 };
 
 #[derive(Debug)]
@@ -76,9 +73,9 @@ where
     }
 }
 
-pub fn cvt_solana_block_hash(block_hash: &String) -> Result<H256> {
+pub fn cvt_solana_block_hash(block_hash: &str) -> ProgramResult<H256> {
     Ok(H256::from(
-        SolanaHash::from_str(block_hash.as_str())
+        SolanaHash::from_str(block_hash)
             .map_err(|_| InternalError)?
             .to_bytes(),
     ))
@@ -87,16 +84,19 @@ pub fn cvt_solana_block_hash(block_hash: &String) -> Result<H256> {
 pub struct BlockParser<'a> {
     solana_block_storage: SolanaBlockStorage,
     transaction_storage: &'a mut TransactionStorage,
+    chain_id: u64,
 }
 
 impl<'a> BlockParser<'a> {
     pub fn new(
         solana_block_storage: SolanaBlockStorage,
         transaction_storage: &'a mut TransactionStorage,
+        chain_id: u64,
     ) -> Self {
         BlockParser {
             solana_block_storage,
             transaction_storage,
+            chain_id,
         }
     }
 
@@ -107,16 +107,24 @@ impl<'a> BlockParser<'a> {
         sol_tx: &SolSignature,
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
-        let (tx_request, eth_signature) = decode_transaction_from_rlp(&Rlp::new(instr_data))?;
-        self.transaction_storage.register_small_tx(
-            slot_number,
-            tx_idx,
-            sol_tx,
-            tx_request,
-            eth_signature,
-            meta,
-        )
+    ) -> ProgramResult<Option<TransactionResult>> {
+        let (tx, eth_sig) = decode_transaction_from_rlp(&Rlp::new(instr_data))?;
+
+        let chain_id = tx
+            .chain_id()
+            .ok_or(NoChainId)
+            .map_err(|e| {
+                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+                e
+            })?
+            .as_u64();
+
+        if chain_id != self.chain_id {
+            return Ok(None);
+        }
+
+        self.transaction_storage
+            .register_small_tx(slot_number, tx_idx, sol_tx, tx, eth_sig, meta)
     }
 
     fn process_do_tx_iterative(
@@ -126,17 +134,28 @@ impl<'a> BlockParser<'a> {
         sol_tx: &SolSignature,
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
-        let (_, _, tx) = iterative_args(instr_data)?;
-        let (tx_request, eth_signature) = decode_transaction_from_rlp(&Rlp::new(tx))?;
-        self.transaction_storage.register_small_tx(
-            slot_number,
-            tx_idx,
-            sol_tx,
-            tx_request,
-            eth_signature,
-            meta,
-        )
+    ) -> ProgramResult<Option<TransactionResult>> {
+        let (_, _, rlp) = do_tx_iterative::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        let (tx, eth_sig) = decode_transaction_from_rlp(&Rlp::new(rlp))?;
+        let chain_id = tx
+            .chain_id()
+            .ok_or(NoChainId)
+            .map_err(|e| {
+                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+                e
+            })?
+            .as_u64();
+
+        if chain_id != self.chain_id {
+            return Ok(None);
+        }
+
+        self.transaction_storage
+            .register_small_tx(slot_number, tx_idx, sol_tx, tx, eth_sig, meta)
     }
 
     fn process_do_tx_holder(
@@ -146,19 +165,23 @@ impl<'a> BlockParser<'a> {
         sol_tx: &SolSignature,
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
-        if instr_data.len() < size_of::<u64>() + size_of::<rome_evm::H256>() {
-            tracing::warn!(
-                "Sol Tx {:?}: EVM DoTxHolder instruction data has incorrect length",
-                sol_tx
-            );
-            return Err(InternalError);
+    ) -> ProgramResult<Option<TransactionResult>> {
+        let (_, hash, chain) = do_tx_holder::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        if chain != self.chain_id {
+            return Ok(None);
         }
 
-        let (_, txn_hash) = instr_data.split_at(8);
-        let txn_hash = TxHash::from_slice(txn_hash);
-        self.transaction_storage
-            .register_big_tx(txn_hash, slot_number, tx_idx, sol_tx, meta)
+        self.transaction_storage.register_big_tx(
+            TxHash::from_slice(hash.as_bytes()),
+            slot_number,
+            tx_idx,
+            sol_tx,
+            meta,
+        )
     }
 
     fn process_do_tx_holder_iterative(
@@ -168,10 +191,18 @@ impl<'a> BlockParser<'a> {
         sol_tx: &SolSignature,
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
-        let (_, txn_hash, _) = holder_iterative_args(instr_data)?;
+    ) -> ProgramResult<Option<TransactionResult>> {
+        let (_, hash, chain, _) = do_tx_holder_iterative::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        if chain != self.chain_id {
+            return Ok(None);
+        }
+
         self.transaction_storage.register_big_tx(
-            TxHash::from_slice(txn_hash.as_bytes()),
+            TxHash::from_slice(hash.as_bytes()),
             slot_number,
             tx_idx,
             sol_tx,
@@ -186,26 +217,21 @@ impl<'a> BlockParser<'a> {
         sol_tx: &SolSignature,
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
-        if instr_data.len() < size_of::<u64>() + size_of::<u64>() + size_of::<rome_evm::H256>() {
-            tracing::warn!(
-                "Sol Tx {:?}: EVM TransferTx instruction data is too short",
-                sol_tx
-            );
-            return Err(InternalError);
+    ) -> ProgramResult<Option<TransactionResult>> {
+        let (_, offset, hash, chain, chunk) = transmit_tx::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        if chain != self.chain_id {
+            return Ok(None);
         }
 
-        let (_, rest) = instr_data.split_at(8);
-        let (holder_offset, rest) = rest.split_at(8);
-        let holder_offset: usize = usize::from_le_bytes(holder_offset.try_into().unwrap()); // TODO remove unwrap
-        let (txn_hash, data) = rest.split_at(32);
-        let txn_hash = TxHash::from_slice(txn_hash);
-
         self.transaction_storage.register_transmit_tx(
-            txn_hash,
+            TxHash::from_slice(hash.as_bytes()),
             slot_number,
-            holder_offset,
-            data,
+            offset,
+            chunk,
             tx_idx,
             sol_tx,
             meta,
@@ -288,13 +314,17 @@ impl<'a> BlockParser<'a> {
         true
     }
 
-    pub fn parse(
+    pub async fn parse(
         &mut self,
         solana_slot_number: Slot,
         program_id: &Pubkey,
         max_blocks: usize,
-    ) -> Result<Option<Arc<BlockData>>> {
-        if let Some(mut current_block) = self.solana_block_storage.get_block(solana_slot_number)? {
+    ) -> ProgramResult<Option<Arc<BlockData>>> {
+        if let Some(mut current_block) = self
+            .solana_block_storage
+            .get_block(solana_slot_number)
+            .await?
+        {
             let mut current_slot = solana_slot_number;
             let block_hash = cvt_solana_block_hash(&current_block.block.blockhash)?;
             let parent_hash = cvt_solana_block_hash(&current_block.block.previous_blockhash)?;
@@ -318,7 +348,8 @@ impl<'a> BlockParser<'a> {
                 current_slot = current_block.block.parent_slot;
                 current_block = self
                     .solana_block_storage
-                    .get_block(current_block.block.parent_slot)?
+                    .get_block(current_block.block.parent_slot)
+                    .await?
                     .ok_or(InternalError)?;
 
                 self.register_block(current_slot, program_id, current_block.clone());

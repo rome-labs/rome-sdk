@@ -17,6 +17,7 @@ serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = {workspace = true}
 
 tokio = {workspace = true}
+futures = {workspace = true}
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
 jsonrpsee-core = {workspace = true}
@@ -29,5 +30,7 @@ solana-transaction-status = {workspace = true}
 solana-quic-client = {workspace = true}
 
 rome-evm = { workspace = true } 
+rome-utils = { workspace = true }
+rome-solana = { workspace = true }
 emulator = { workspace = true } 
 ethers = { workspace = true }

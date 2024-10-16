@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_config::RpcBlockConfig;
 use solana_sdk::clock::Slot;
+use solana_transaction_status::{TransactionDetails, UiTransactionEncoding};
 
 use crate::config::SolanaConfig;
 use crate::types::{BlockSender, SlotReceiver, SlotSender};
@@ -75,7 +77,16 @@ impl SolanaBlockIndexer {
 
                         async move {
                             let block = client
-                                .get_block(slot)
+                                .get_block_with_config(
+                                    slot,
+                                    RpcBlockConfig {
+                                        encoding: Some(UiTransactionEncoding::Base58),
+                                        transaction_details: Some(TransactionDetails::Full),
+                                        rewards: None,
+                                        commitment: Some(client.commitment()),
+                                        max_supported_transaction_version: None,
+                                    },
+                                )
                                 .await
                                 .with_context(|| format!("Failed to get block on slot {}", slot))?;
 

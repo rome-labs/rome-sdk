@@ -16,6 +16,14 @@ pub struct RomeConfig {
 
     /// Path to payer key-pair file
     pub payer_path: PathBuf,
+
+    /// Number of holder accounts
+    #[serde(default = "default_holder_count")]
+    pub holder_count: u64,
+}
+
+const fn default_holder_count() -> u64 {
+    16
 }
 
 impl RomeConfig {

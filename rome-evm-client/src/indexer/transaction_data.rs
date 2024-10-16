@@ -1,6 +1,6 @@
 use {
     crate::{
-        error::Result,
+        error::ProgramResult,
         indexer::tx_parser::{EVMStatusCode, TxParser, GasReport},
     },
     ethers::types::{
@@ -28,12 +28,10 @@ impl Ord for TxSignature {
         if self.sol_slot_number == other.sol_slot_number {
             if self.sol_signature == other.sol_signature {
                 Ordering::Equal
+            } else if self.sol_tx_idx > other.sol_tx_idx {
+                Ordering::Greater
             } else {
-                if self.sol_tx_idx > other.sol_tx_idx {
-                    Ordering::Greater
-                } else {
-                    Ordering::Less
-                }
+                Ordering::Less
             }
         } else if self.sol_slot_number > other.sol_slot_number {
             Ordering::Greater
@@ -67,7 +65,7 @@ impl TransactionData {
     pub fn new_small_tx(
         tx_request: &TypedTransaction,
         eth_signature: EthSignature,
-    ) -> Result<Self> {
+    ) -> ProgramResult<Self> {
         Ok(Self {
             state: TransactionDataState::Parsing(TxParser::new_small_tx_parser(
                 tx_request.clone(),
@@ -104,7 +102,7 @@ impl TransactionData {
         block_hash: H256,
         block_number: U64,
         block_gas_used: U256,
-    ) -> Result<()> {
+    ) -> ProgramResult<()> {
         let new_state = if let TransactionDataState::Parsing(tx_parser) = &self.state {
             let (transaction, receipt, gas_report) =
                 tx_parser.build(log_index, transaction_index, block_hash, block_number, block_gas_used)?;
@@ -145,7 +143,7 @@ impl TransactionData {
         sol_tx_idx: usize,
         sol_signature: SolSignature,
         sol_meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
+    ) -> ProgramResult<Option<TransactionResult>> {
         match &mut self.state {
             TransactionDataState::Parsing(tx_parser) => {
                 if self.sol_signatures.insert(TxSignature {
@@ -167,7 +165,7 @@ impl TransactionData {
                     }
                 }
 
-                return Ok(None);
+                Ok(None)
             }
 
             TransactionDataState::Completed(_) => Ok(None),
@@ -181,7 +179,7 @@ impl TransactionData {
         sol_signature: &SolSignature,
         offset: usize,
         data: &[u8],
-    ) -> Result<Option<TransactionResult>> {
+    ) -> ProgramResult<Option<TransactionResult>> {
         match &mut self.state {
             TransactionDataState::Parsing(tx_parser) => {
                 if self.sol_signatures.insert(TxSignature {
@@ -192,17 +190,17 @@ impl TransactionData {
                     tx_parser.write_trx_data_to_holder(offset, data);
                 }
 
-                return Ok(None);
+                Ok(None)
             }
 
-            TransactionDataState::Completed(_) => return Ok(None),
+            TransactionDataState::Completed(_) => Ok(None),
         }
     }
 
     pub fn indexed_sol_transactions(&self) -> HashSet<SolSignature> {
         self.sol_signatures
             .iter()
-            .map(|sig| sig.sol_signature.clone())
+            .map(|sig| sig.sol_signature)
             .collect()
     }
 }

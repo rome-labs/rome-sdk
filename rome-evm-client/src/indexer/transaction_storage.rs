@@ -1,6 +1,6 @@
 use {
     crate::{
-        error::Result,
+        error::ProgramResult,
         indexer::transaction_data::{TransactionData, TransactionResult},
     },
     ethers::types::{
@@ -13,16 +13,14 @@ use {
     std::collections::{btree_map, BTreeMap},
 };
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct TransactionStorage {
     transactions: BTreeMap<TxHash, TransactionData>,
 }
 
 impl TransactionStorage {
     pub fn new() -> Self {
-        Self {
-            transactions: BTreeMap::new(),
-        }
+        Self::default()
     }
 
     pub fn get_transaction(&self, tx_hash: &TxHash) -> Option<&TransactionData> {
@@ -32,9 +30,9 @@ impl TransactionStorage {
     fn update_or_create_transaction<T>(
         &mut self,
         evm_tx_hash: TxHash,
-        constructor: impl FnOnce() -> Result<TransactionData>,
-        updater: impl FnOnce(&mut TransactionData) -> Result<T>,
-    ) -> Result<T> {
+        constructor: impl FnOnce() -> ProgramResult<TransactionData>,
+        updater: impl FnOnce(&mut TransactionData) -> ProgramResult<T>,
+    ) -> ProgramResult<T> {
         match self.transactions.entry(evm_tx_hash) {
             btree_map::Entry::Occupied(mut entry) => updater(entry.get_mut()),
             btree_map::Entry::Vacant(entry) => updater(entry.insert(constructor()?)),
@@ -49,10 +47,10 @@ impl TransactionStorage {
         tx_request: TypedTransaction,
         eth_signature: EthSignature,
         sol_meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
+    ) -> ProgramResult<Option<TransactionResult>> {
         let evm_tx_hash = tx_request.hash(&eth_signature);
         self.update_or_create_transaction(
-            evm_tx_hash.clone(),
+            evm_tx_hash,
             || TransactionData::new_small_tx(&tx_request, eth_signature),
             |tx| {
                 tx.update_execute_tx(
@@ -73,7 +71,7 @@ impl TransactionStorage {
         sol_tx_idx: usize,
         sol_signature: &SolSignature,
         sol_meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
+    ) -> ProgramResult<Option<TransactionResult>> {
         self.update_or_create_transaction(
             evm_tx_hash,
             || Ok(TransactionData::new_big_tx()),
@@ -89,6 +87,7 @@ impl TransactionStorage {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn register_transmit_tx(
         &mut self,
         evm_tx_hash: TxHash,
@@ -98,7 +97,7 @@ impl TransactionStorage {
         sol_tx_idx: usize,
         sol_signature: &SolSignature,
         meta: &UiTransactionStatusMeta,
-    ) -> Result<Option<TransactionResult>> {
+    ) -> ProgramResult<Option<TransactionResult>> {
         if meta.err.is_some() {
             return Ok(None);
         }
@@ -126,7 +125,7 @@ impl TransactionStorage {
         block_hash: H256,
         block_number: U64,
         block_gas_used: U256,
-    ) -> Result<Option<&TransactionReceipt>> {
+    ) -> ProgramResult<Option<&TransactionReceipt>> {
         if let Some(tx) = self.transactions.get_mut(tx_hash) {
             tx.try_finalize(
                 log_index,

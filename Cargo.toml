@@ -53,6 +53,7 @@ rome-geth = { path = "rome-geth" }
 rome-evm-client = { path = "rome-evm-client" }
 # Other utilities
 futures-util = { version = "0.3.30", features = ["sink", "tokio-io"] }
+futures = "0.3.30"
 dotenv = "0.15.0"
 url = { version = "2.5.2", features = ["serde"] }
 rand = "0.8.5"

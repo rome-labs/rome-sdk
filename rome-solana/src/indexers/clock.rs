@@ -7,13 +7,13 @@ use solana_sdk::clock::DEFAULT_MS_PER_SLOT;
 use solana_sdk::hash::Hash;
 use tokio::sync::RwLock;
 
-use crate::types::AtomicRpcClient;
+use crate::types::AsyncAtomicRpcClient;
 
 /// Clock indexer for the Solana cluster
 #[derive(Clone)]
 pub struct SolanaClockIndexer {
     /// RPC client to interact with the Solana cluster
-    client: AtomicRpcClient,
+    client: AsyncAtomicRpcClient,
     /// Current clock
     clock: SolanaClock,
 }
@@ -29,14 +29,14 @@ pub struct SolanaClock {
 
 impl SolanaClockIndexer {
     /// Create a new [SolanaClockIndexer] instance
-    pub async fn new(client: AtomicRpcClient) -> anyhow::Result<Self> {
+    pub async fn new(client: AsyncAtomicRpcClient) -> anyhow::Result<Self> {
         let clock = SolanaClock::new(&client).await?;
 
         Ok(Self { client, clock })
     }
 
     /// Get the current clock
-    pub async fn get_current_clock(&self) -> SolanaClock {
+    pub fn get_current_clock(&self) -> SolanaClock {
         self.clock.clone()
     }
 
@@ -84,11 +84,12 @@ impl SolanaClock {
 
     /// Get clock information from [RpcClient]
     pub async fn fetch_network_clock_info(client: &RpcClient) -> anyhow::Result<(u64, Hash)> {
-        client
-            .get_latest_blockhash_with_commitment(client.commitment())
-            .await
-            .map(|(blockhash, slot)| (slot, blockhash))
-            .map_err(Into::into)
+        let blockhash = client.get_latest_blockhash();
+        let slot = client.get_slot();
+
+        let (slot_res, blockhash_res) = tokio::join!(slot, blockhash);
+
+        Ok((slot_res?, blockhash_res?))
     }
 
     /// Sync the clock

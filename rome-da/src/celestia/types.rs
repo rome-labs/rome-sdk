@@ -1,7 +1,6 @@
 use ethers::types::{Transaction, U256, U64};
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DaSubmissionBlock {
     pub block_number: U64,
