@@ -1,20 +1,20 @@
-use std::fmt::Debug;
 use self::claim::EngineClaim;
 use self::config::GethEngineConfig;
 use crate::engine::types::param::{
     ForkchoiceUpdateParams, ForkchoiceUpdateResponse, PayloadStatus,
 };
+use anyhow::anyhow;
 use ethers::core::types::Transaction;
 use ethers::prelude::ProviderError::CustomError;
 use reqwest::header::HeaderMap;
+use rome_evm_client::indexer::tx_parser::GasReport;
 use rome_utils::auth::AuthState;
 use rome_utils::jsonrpc::{JsonRpcClient, JsonRpcRequest};
 use serde_json::{from_value, json};
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use anyhow::anyhow;
-use rome_evm_client::indexer::tx_parser::GasReport;
 
 /// Claim to authenticate geth engine.
 pub mod claim;
@@ -128,7 +128,7 @@ impl GethEngine {
 
         // Prev randao and suggested fee recipient are set to random values
         let hex_timestamp = format!("0x{:x}", timestamp);
-        
+
         let gas_prices: Vec<u64> = transactions
             .iter()
             .filter_map(|(tx, _)| tx.gas_price)
@@ -140,15 +140,20 @@ impl GethEngine {
             .map(|(_, gas_report)| gas_report)
             .collect();
 
-        let first_report = gas_reports.first().ok_or(anyhow!("Gas reports are empty"))?;
+        let first_report = gas_reports
+            .first()
+            .ok_or(anyhow!("Gas reports are empty"))?;
         let fee_recipient = first_report.gas_recipient.unwrap_or_default();
         for report in &gas_reports {
             if report.gas_recipient.unwrap_or_default() != fee_recipient {
-                return Err(anyhow!("Transactions must have the same fee recipient"))
+                return Err(anyhow!("Transactions must have the same fee recipient"));
             }
         }
-        
-        let gas_used: Vec<u64> = gas_reports.iter().map(|gas_report| gas_report.gas_value.as_u64()).collect();
+
+        let gas_used: Vec<u64> = gas_reports
+            .iter()
+            .map(|gas_report| gas_report.gas_value.as_u64())
+            .collect();
 
         let forkchoice_params = ForkchoiceUpdateParams {
             transactions: transactions

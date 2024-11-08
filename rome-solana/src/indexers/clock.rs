@@ -50,7 +50,9 @@ impl SolanaClockIndexer {
 
             let old_slot = self.clock.get_current_slot();
 
-            self.clock.sync(&self.client).await?;
+            if let Err(e) = self.clock.sync(&self.client).await {
+                tracing::error!("Cannot read blockhash and slot from solana: {}", e)
+            };
 
             let new_slot = self.clock.get_current_slot();
 

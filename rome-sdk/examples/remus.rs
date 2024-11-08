@@ -28,10 +28,10 @@ async fn main() -> anyhow::Result<()> {
     let remus_tx = RemusTx::new(txs);
 
     // Let's compose a cross rollup atomic transaction
-    let rome_tx = rome.compose_cross_rollup_tx(remus_tx).await?;
+    let mut rome_tx = rome.compose_cross_rollup_tx(remus_tx).await?;
 
     // send the transaction to the solana network
-    let signature = rome.send_and_confirm(&*rome_tx).await?;
+    let signature = rome.send_and_confirm(&mut *rome_tx).await?;
 
     // print the signature and the explorer link
     println!("Signature: {:?}", signature);

@@ -1,14 +1,13 @@
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    indexer::log_parser,
-    tx::{utils::build_solana_tx, AtomicTx, AtomicTxHolder, IterativeTx, IterativeTxHolder},
+use crate::{error::{ProgramResult, RomeEvmError}, indexer::log_parser,
+            tx::{
+                utils::build_solana_tx, AtomicTx, AtomicTxHolder, IterativeTx, IterativeTxHolder
+            }, Payer, ResourceFactory, Resource,
 };
 use bincode::serialize;
 use emulator::{emulate, Emulation};
 use ethers::types::{Bytes, TxHash};
-use rome_evm::NUMBER_OPCODES_PER_TX;
+use rome_evm::{ExitReason, NUMBER_OPCODES_PER_TX};
 use rome_solana::{batch::AdvanceTx, types::SyncAtomicRpcClient};
-use rome_utils::holder::HolderFactory;
 use serde_json::json;
 use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_program::{
@@ -17,8 +16,7 @@ use solana_program::{
     instruction::{AccountMeta, Instruction},
 };
 use solana_sdk::{
-    bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey, signature::Keypair, signer::Signer,
-    transaction::Transaction,
+    bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey, transaction::Transaction,
 };
 use solana_transaction_status::UiTransactionEncoding;
 
@@ -31,19 +29,30 @@ pub struct TxBuilder {
     program_id: Pubkey,
     /// Synchronous Atomic RPC client
     rpc_client: SyncAtomicRpcClient,
-    /// Holder factory to create holder instances
-    holder_factory: HolderFactory,
+    /// Resource factory to get Solana payer, fee_recipient, holder index
+    resource_factory: ResourceFactory,
 }
 
 impl TxBuilder {
     /// Create a new Transaction Builder
-    pub fn new(chain_id: u64, program_id: Pubkey, rpc_client: SyncAtomicRpcClient) -> Self {
+    pub fn new(
+        chain_id: u64,
+        program_id: Pubkey,
+        rpc_client: SyncAtomicRpcClient,
+        payers: Vec<Payer>,
+    ) -> Self {
+        let resource_factory = ResourceFactory::from_payers(payers);
+
         Self {
             chain_id,
             program_id,
             rpc_client,
-            holder_factory: HolderFactory::default(),
+            resource_factory,
         }
+    }
+
+    pub async fn lock_resource(&self) -> ProgramResult<Resource> {
+        self.resource_factory.get().await
     }
 
     /// get program id
@@ -57,101 +66,85 @@ impl TxBuilder {
         tracing::info!("Emulating Transaction with payer: {:?}", payer);
 
         let emulation = emulate(&self.program_id, data, payer, self.rpc_client.clone())?;
-        Self::check_revert(&emulation)?;
+        Self::check_emulation(&emulation)?;
 
         Ok(emulation)
     }
 
     // check for revert
-    pub fn check_revert(emulation: &Emulation) ->ProgramResult<()> {
+    pub fn check_emulation(emulation: &Emulation) -> ProgramResult<()> {
         if let Some(vm) = emulation.vm.as_ref() {
-            if vm.exit_reason.is_revert() {
-                let mes = vm
-                    .return_value
-                    .as_ref()
-                    .and_then(|value| log_parser::decode_revert(value))
-                    .unwrap_or_default();
+            return match vm.exit_reason {
+                ExitReason::Succeed(_) => Ok(()),
+                ExitReason::Revert(_) => {
+                    let mes = vm
+                        .return_value
+                        .as_ref()
+                        .and_then(|value| log_parser::decode_revert(value))
+                        .unwrap_or_default();
+                    let data = vm.return_value.clone().unwrap_or_default();
+                    Err(RomeEvmError::Revert(mes, data))
+                }
 
-                let data = vm.return_value.clone().unwrap_or_default();
-
-                return Err(RomeEvmError::Revert(mes, data));
-            }
+                exit_reason => Err(RomeEvmError::ExitReason(exit_reason)),
+            };
         }
         Ok(())
     }
 
-    /// Build a transaction
-    #[tracing::instrument(skip(self, rlp, payer))]
-    pub async fn build_tx(
+    fn build_atomic(
         &self,
+        atomic_tx: AtomicTx,
         rlp: Bytes,
         tx_hash: TxHash,
-        payer: &Keypair,
     ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
-        tracing::info!("Building Transaction with payer: {:?}", payer.pubkey());
 
-        let payer_key = payer.pubkey();
+        let ix = atomic_tx.ix.as_ref().unwrap();
+        let tx = build_solana_tx(Hash::default(), &atomic_tx.resource.payer(), ix)?;
 
-        let mut atomic_tx = AtomicTx::new_owned(self.clone(), rlp.to_vec());
-        // Build the instruction
-        atomic_tx.ix(&payer_key)?;
-        let emulation = atomic_tx.emulation.as_ref().unwrap();
-        let vm = emulation.vm.as_ref().expect("Vm expected");
+        if is_holder_needed(&tx)? {
+            tracing::info!("Atomic Tx Holder needed");
+            let atomix_tx_holder = AtomicTxHolder::new(
+                self.clone(),
+                atomic_tx.resource,
+                rlp,
+                tx_hash
+            );
 
-        let is_atomic_tx = vm.steps_executed <= NUMBER_OPCODES_PER_TX
-            && emulation.allocated <= MAX_PERMITTED_DATA_INCREASE;
+            Ok(Box::new(atomix_tx_holder))
+        } else {
+            tracing::info!("Simple Atomic Tx");
 
-        tracing::info!(
-            is_atomic_tx,
-            steps_executed = vm.steps_executed,
-            allocated = emulation.allocated,
-            "Building Transaction", // Log message
-        );
-
-        // atomic tx
-        if is_atomic_tx {
-            let ix = atomic_tx.ix.as_ref().unwrap();
-
-            // Build the transaction
-            let tx = build_solana_tx(Hash::default(), payer, ix)?;
-
-            // Check if the holder is needed
-            if is_holder_needed(&tx)? {
-                tracing::info!("Atomic Tx Holder needed");
-
-                let holder = self.holder_factory.lock_holder().await;
-
-                let atomix_tx_holder = AtomicTxHolder::new(self.clone(), holder, rlp, tx_hash);
-
-                return Ok(Box::new(atomix_tx_holder));
-            } else {
-                tracing::info!("Simple Atomic Tx");
-                return Ok(Box::new(atomic_tx));
-            };
+            Ok(Box::new(atomic_tx))
         }
+    }
 
-        assert!(!is_atomic_tx);
+    fn build_iterative(
+        &self,
+        resource: Resource,
+        rlp: Bytes,
+        tx_hash: TxHash,
+    ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
 
-        // Lock a holder
-        let holder = self.holder_factory.lock_holder().await;
-
-        // iterative tx
-        let mut iterative_tx = IterativeTx::new(self.clone(), holder, rlp.clone())?;
-        iterative_tx.ixs(&payer_key)?;
+        let mut iterative_tx = IterativeTx::new(self.clone(), resource, rlp.clone())?;
+        iterative_tx.ixs()?;
         let ixs = iterative_tx.ixs.as_ref().unwrap();
 
         let tx = build_solana_tx(
             Hash::default(),
-            payer,
+            &iterative_tx.resource.payer(),
             ixs.last().expect("no instructions in iterative Tx"),
         )?;
 
         if is_holder_needed(&tx)? {
             tracing::info!("Iterative Tx Holder needed");
 
-            let holder = iterative_tx.take_holder();
-
-            let iterative_tx_holder = IterativeTxHolder::new(self.clone(), holder, rlp, tx_hash);
+            let iterative_tx_holder = IterativeTxHolder::new(
+                self.clone(),
+                iterative_tx.resource,
+                rlp,
+                tx_hash
+            );
 
             Ok(Box::new(iterative_tx_holder))
         } else {
@@ -161,7 +154,35 @@ impl TxBuilder {
         }
     }
 
-    /// Build a Solana instruction from [Emulation] and data
+    /// Build a transaction
+    #[tracing::instrument(skip(self, rlp))]
+    pub async fn build_tx(
+        &self,
+        rlp: Bytes,
+        tx_hash: TxHash,
+    ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
+
+        // Lock a holder, payer
+        let resource = self.lock_resource().await?;
+        let mut atomic_tx = AtomicTx::new(self.clone(), rlp.to_vec(), resource);
+        // Build the instruction
+        atomic_tx.ix()?;
+        let emulation = atomic_tx.emulation.as_ref().unwrap();
+        let vm = emulation.vm.as_ref().expect("Vm expected");
+
+        let is_atomic_tx = vm.steps_executed <= NUMBER_OPCODES_PER_TX
+            && emulation.allocated <= MAX_PERMITTED_DATA_INCREASE
+            && emulation.syscalls < 64;
+
+        tracing::info!("Building Transaction");
+        if is_atomic_tx {
+            self.build_atomic(atomic_tx, rlp, tx_hash)
+        } else {
+            self.build_iterative(atomic_tx.resource, rlp, tx_hash)
+        }
+    }
+
+    /// Build a Solapayerna instruction from [Emulation] and data
     pub fn build_ix(&self, emulation: &Emulation, data: Vec<u8>) -> Instruction {
         let accounts = emulation
             .accounts
@@ -182,6 +203,24 @@ impl TxBuilder {
 
     pub fn client_cloned(&self) -> SyncAtomicRpcClient {
         self.rpc_client.clone()
+    }
+
+    pub fn confirm_tx_iterative(
+        &self,
+        holder: u64,
+        hash: TxHash,
+        payer: &Pubkey,
+        session: u64,
+    ) -> ProgramResult<bool> {
+        Ok(emulator::confirm_tx_iterative(
+            &self.program_id,
+            holder,
+            rome_evm::H256::from_slice(hash.as_bytes()),
+            payer,
+            self.client_cloned(),
+            self.chain_id,
+            session
+        )?)
     }
 }
 

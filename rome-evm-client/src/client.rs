@@ -3,10 +3,11 @@ use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
 use tokio::sync::oneshot;
 
 use crate::error::{ProgramResult, RomeEvmError};
+use crate::indexer::transaction_storage::TransactionStorage;
 use crate::indexer::{
     ethereum_block_storage::{BlockType, EthereumBlockStorage},
     indexer::Indexer,
-    transaction_data::TransactionData,
+    solana_block_storage::SolanaBlockStorage,
 };
 use crate::tx::TxBuilder;
 use crate::util::RomeEvmUtil;
@@ -24,17 +25,19 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::sync::Arc;
+use rome_evm::OwnerInfo;
+use crate::Payer;
 
 /// Client component interacting with the instance of Rome-EVM smart-contract on Solana blockchain
 /// (Rome-EVM Rollup).
 ///
 /// Interface of RomeEVMClient is designed to be closely compatible with standard Ethereum JSON RPC
 /// and mostly repeats its functionality.
-pub struct RomeEVMClient {
+pub struct RomeEVMClient<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> {
     /// Rollup indexer
-    indexer: Arc<Indexer>,
+    indexer: Arc<Indexer<S, T>>,
 
-    /// Ethereum block storage
+    /// Ethereum block stPayerListorage
     ethereum_block_storage: EthereumBlockStorage,
 
     /// Transaction builder
@@ -46,7 +49,7 @@ pub struct RomeEVMClient {
 
 const INDEXING_INTERVAL_MS: u64 = 400;
 
-impl RomeEVMClient {
+impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMClient<S, T> {
     /// Constructor
     ///
     /// * `chain_id` - Chain ID of a Rollup
@@ -61,12 +64,14 @@ impl RomeEVMClient {
     /// * `token` - token to call Graceful Shutdown of the async tasks
     ///
     /// Returns tuple (<Client_instance, Run_future>)
-    pub fn
-    new(
+    pub fn new(
         chain_id: u64,
         program_id: Pubkey,
         solana: SolanaTower,
         commitment_level: CommitmentLevel,
+        solana_block_storage: S,
+        transaction_storage: T,
+        payers: Vec<Payer>,
     ) -> Self {
         let sync_client = Arc::new(RpcClient::new_with_commitment(
             solana.client().url(),
@@ -76,12 +81,14 @@ impl RomeEVMClient {
         Self {
             indexer: Arc::new(Indexer::new(
                 program_id,
+                solana_block_storage,
+                transaction_storage,
                 solana.client_cloned(),
                 commitment_level,
                 chain_id,
             )),
             ethereum_block_storage: EthereumBlockStorage::new(),
-            tx_builder: TxBuilder::new(chain_id, program_id, sync_client),
+            tx_builder: TxBuilder::new(chain_id, program_id, sync_client, payers),
             solana,
         }
     }
@@ -137,14 +144,13 @@ impl RomeEVMClient {
     /// * `eth_signature` - Signature of a transaction
     ///
     /// Returns transaction hash or error if transaction can not be executed
-    pub async fn send_transaction(&self, rlp: Bytes, payer: &Keypair) -> ProgramResult<TxHash> {
+    pub async fn send_transaction(&self, rlp: Bytes) -> ProgramResult<TxHash> {
         let hash: TxHash = keccak256(rlp.as_ref()).into();
 
-        let mut tx = self.tx_builder.build_tx(rlp, hash, payer).await?;
-        // let iter = EvmTxStepIterator::new(&*tx);
+        let mut tx = self.tx_builder.build_tx(rlp, hash).await?;
 
         self.solana
-            .send_and_confirm_tx_iterable(&mut *tx, payer)
+            .send_and_confirm_tx_iterable(&mut *tx)
             .await
             .map_err(|err| RomeEvmError::Custom(err.to_string()))?;
 
@@ -225,7 +231,7 @@ impl RomeEVMClient {
             RomeEvmUtil::cast_transaction_request(&call, self.tx_builder.chain_id),
             self.sync_rpc_client(),
         )?;
-        TxBuilder::check_revert(&emulation)?;
+        TxBuilder::check_emulation(&emulation)?;
 
         Ok(emulation.gas.into())
     }
@@ -235,16 +241,13 @@ impl RomeEVMClient {
             BlockId::Number(number) => match number {
                 BlockNumber::Latest => self.ethereum_block_storage.latest_block().await,
                 BlockNumber::Number(number) => Some(number),
-                other => {
-                    tracing::warn!("Block tag {:?} not supported", other);
-                    return Err(RomeEvmError::InternalError);
-                }
+                other => return Err(RomeEvmError::Custom(format!("Block tag {:?} not supported", other))),
             },
-            BlockId::Hash(hash) => {
-                self.ethereum_block_storage.get_block_by_hash(hash)
-                    .await
-                    .map(|block| block.number)
-            },
+            BlockId::Hash(hash) => self
+                .ethereum_block_storage
+                .get_block_by_hash(hash)
+                .await
+                .map(|block| block.number),
         })
     }
 
@@ -313,11 +316,11 @@ impl RomeEVMClient {
                     .get_block_by_number(block_number)
                     .await
                 {
-                    // Block found in the cache - return to client
-                    let lock = self.indexer.get_transaction_storage();
-                    let lock = lock.read().await;
-
-                    Some(block.get_block(full_transactions, &lock))
+                    Some(
+                        block
+                            .get_block(full_transactions, self.indexer.get_transaction_storage())
+                            .await?,
+                    )
                 } else {
                     None
                 },
@@ -338,7 +341,7 @@ impl RomeEVMClient {
     pub async fn process_transaction<Ret>(
         &self,
         tx_hash: H256,
-        processor: impl FnOnce(&TransactionData) -> Option<Ret>,
+        processor: impl FnOnce(&T::TransactionType) -> Option<Ret>,
     ) -> ProgramResult<Option<Ret>> {
         self.indexer.map_tx(tx_hash, processor).await
     }
@@ -389,36 +392,13 @@ impl RomeEVMClient {
     }
 
     /// Get indexer
-    pub fn indexer(&self) -> Arc<Indexer> {
+    pub fn indexer(&self) -> Arc<Indexer<S, T>> {
         self.indexer.clone()
     }
 
     /// Get reference to TxBuilder
     pub fn tx_builder(&self) -> &TxBuilder {
         &self.tx_builder
-    }
-
-    /// Register operator's gas recipient address in chain
-    ///
-    /// * `address` - Address of the operator to receive the payment for gas
-    pub async fn reg_gas_recipient(&self, address: Address, payer: &Keypair) -> ProgramResult<()> {
-        let mut data = vec![Instruction::RegSigner as u8];
-        data.extend(address.as_bytes());
-        data.extend(self.chain_id().to_le_bytes());
-
-        let emulation = emulator::emulate(
-            self.program_id(),
-            &data,
-            &payer.pubkey(),
-            self.sync_rpc_client(),
-        )?;
-
-        let ix = self.tx_builder.build_ix(&emulation, data);
-        let blockhash = self.rpc_client().get_latest_blockhash().await?;
-        let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], blockhash);
-        let _ = self.rpc_client().send_and_confirm_transaction(&tx).await?;
-
-        Ok(())
     }
 
     /// Retrieves the value stored at a specific storage slot for a given address.
@@ -515,5 +495,14 @@ impl RomeEVMClient {
         let _ = self.rpc_client().send_and_confirm_transaction(&tx).await?;
 
         Ok(())
+    }
+
+    pub fn get_rollups(&self) -> ProgramResult<Vec<OwnerInfo>> {
+        let rollups = emulator::get_rollups(
+            self.program_id(),
+            self.sync_rpc_client(),
+        )?;
+
+        Ok(rollups)
     }
 }

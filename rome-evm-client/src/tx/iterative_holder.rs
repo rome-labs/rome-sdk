@@ -1,41 +1,44 @@
 use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use rome_utils::holder::Holder;
-use solana_program::pubkey::Pubkey;
 
-use super::{
-    builder::TxBuilder,
-    utils::{ro_lock_overrides, MULTIPLE_ITERATIONS},
-    TransmitTx,
+use super::{builder::TxBuilder, utils::MULTIPLE_ITERATIONS, TransmitTx};
+use crate::{
+    error::{ProgramResult, RomeEvmError}, Resource,
 };
-use crate::error::{ProgramResult, RomeEvmError};
 use async_trait::async_trait;
 use emulator::Emulation;
 use ethers::types::{Bytes, TxHash};
+use solana_sdk::signature::Keypair;
+use std::sync::Arc;
 
 pub struct IterativeTxHolder {
     transmit_tx: TransmitTx,
     step: Steps,
+    session: u64,
 }
 
 enum Steps {
     Transmit,
     Execute,
+    Confirm,
     Complete,
 }
 impl IterativeTxHolder {
-    pub fn new(tx_builder: TxBuilder, holder: Holder, rlp: Bytes, hash: TxHash) -> Self {
-        let transmit_tx = TransmitTx::new(tx_builder, holder, rlp, hash);
+    pub fn new(tx_builder: TxBuilder, resource: Resource, rlp: Bytes, hash: TxHash) -> Self {
+        let transmit_tx = TransmitTx::new(tx_builder, resource, rlp, hash);
         Self {
             transmit_tx,
             step: Steps::Transmit,
+            session: rand::random(),
         }
     }
 
     fn emulation_data(&self) -> Vec<u8> {
         let mut data = vec![emulator::Instruction::DoTxHolderIterative as u8];
-        data.extend(self.transmit_tx.holder.get_index().to_le_bytes());
+        data.extend(self.session.to_le_bytes());
+        data.extend(self.transmit_tx.resource.holder());
         data.extend(self.transmit_tx.hash.as_bytes());
         data.extend(self.transmit_tx.tx_builder.chain_id.to_le_bytes());
+        data.append(&mut self.transmit_tx.resource.fee_recipient());
 
         data
     }
@@ -44,21 +47,25 @@ impl IterativeTxHolder {
     fn tx_data(&self, emulation: &Emulation, unique: u64) -> ProgramResult<Vec<u8>> {
         let mut data = vec![emulator::Instruction::DoTxHolderIterative as u8];
         data.extend(unique.to_le_bytes());
-        data.extend(self.transmit_tx.holder.get_index().to_le_bytes());
+        data.extend(self.session.to_le_bytes());
+        data.extend(self.transmit_tx.resource.holder());
         data.extend(self.transmit_tx.hash.as_bytes());
         data.extend(self.transmit_tx.tx_builder.chain_id.to_le_bytes());
-        let mut overrides = ro_lock_overrides(emulation)?;
-        data.append(&mut overrides);
+        data.append(&mut self.transmit_tx.resource.fee_recipient());
+        data.append(&mut emulation.lock_overrides.clone());
 
         Ok(data)
     }
 
-    fn ixs(&self, payer: &Pubkey) -> ProgramResult<Vec<OwnedAtomicIxBatch>> {
+    fn ixs(&self) -> ProgramResult<Vec<OwnedAtomicIxBatch>> {
         let data = self.emulation_data();
-        let emulation = self.transmit_tx.tx_builder.emulate(&data, payer)?;
+        let emulation = self.transmit_tx.tx_builder.emulate(
+            &data,
+            &self.transmit_tx.resource.payer_key()
+        )?;
 
         let vm = emulation.vm.as_ref().expect("vm expected");
-        let count = vm.iteration_count * MULTIPLE_ITERATIONS;
+        let count = (vm.iteration_count as f64 * MULTIPLE_ITERATIONS) as u64;
 
         let ixs = (0..count)
             .map(|unique| self.tx_data(&emulation, unique))
@@ -74,25 +81,40 @@ impl IterativeTxHolder {
 #[async_trait]
 impl AdvanceTx<'_> for IterativeTxHolder {
     type Error = RomeEvmError;
-    fn advance(&mut self, payer: &Pubkey) -> ProgramResult<IxExecStepBatch<'static>> {
+    fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
         match &self.step {
             Steps::Transmit => {
-                let ix = self.transmit_tx.advance(payer);
+                let ix = self.transmit_tx.advance();
 
                 if let Ok(IxExecStepBatch::End) = ix {
                     self.step = Steps::Execute;
-                    self.advance(payer)
+                    self.advance()
                 } else {
                     ix
                 }
             }
             Steps::Execute => {
-                self.step = Steps::Complete;
-                let ixs = self.ixs(payer)?;
+                self.step = Steps::Confirm;
+                let ixs = self.ixs()?;
 
-                Ok(IxExecStepBatch::Parallel(ixs))
+                Ok(IxExecStepBatch::ParallelUnchecked(ixs))
+            }
+            Steps::Confirm => {
+                self.step = Steps::Complete;
+
+                let confirm = self.transmit_tx.tx_builder.confirm_tx_iterative(
+                    self.transmit_tx.resource.holder_index(),
+                    self.transmit_tx.hash,
+                    &self.transmit_tx.resource.payer_key(),
+                    self.session,
+                )?;
+
+                Ok(IxExecStepBatch::ConfirmationIterativeTx(confirm))
             }
             _ => Ok(IxExecStepBatch::End),
         }
+    }
+    fn payer(&self) -> Arc<Keypair> {
+        self.transmit_tx.payer()
     }
 }

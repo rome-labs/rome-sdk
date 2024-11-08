@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use rome_solana::config::SolanaConfig;
+use rome_evm_client::resources::PayerConfig;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 /// Rome interface configuration
@@ -15,15 +16,7 @@ pub struct RomeConfig {
     pub rollups: HashMap<u64, String>,
 
     /// Path to payer key-pair file
-    pub payer_path: PathBuf,
-
-    /// Number of holder accounts
-    #[serde(default = "default_holder_count")]
-    pub holder_count: u64,
-}
-
-const fn default_holder_count() -> u64 {
-    16
+    pub payers: Vec<PayerConfig>,
 }
 
 impl RomeConfig {

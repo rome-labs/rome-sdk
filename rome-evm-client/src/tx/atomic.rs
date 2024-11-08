@@ -1,55 +1,45 @@
 use super::builder::TxBuilder;
-use crate::error::{ProgramResult, RomeEvmError};
+use crate::{error::{ProgramResult, RomeEvmError}, Resource};
 use async_trait::async_trait;
 use emulator::Emulation;
 use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use solana_sdk::pubkey::Pubkey;
-use std::borrow::Cow;
-// use super::AdvanceTx;
+use std::sync::Arc;
+use solana_sdk::signature::Keypair;
 
 /// A simple atomic transaction
-pub struct AtomicTx<'a> {
+pub struct AtomicTx {
     tx_builder: TxBuilder,
-    rlp: Cow<'a, [u8]>,
+    rlp: Vec<u8>,
     pub ix: Option<OwnedAtomicIxBatch>,
     pub emulation: Option<Emulation>,
     complete: bool,
+    pub resource: Resource,
 }
 
-impl AtomicTx<'static> {
-    /// Creates a new AtomicTx from owned [Vec<u8>].
-    pub fn new_owned(tx_builder: TxBuilder, rlp: Vec<u8>) -> Self {
+impl AtomicTx {
+    pub fn new(tx_builder: TxBuilder, rlp: Vec<u8>, resource: Resource) -> Self {
         Self {
             tx_builder,
-            rlp: Cow::Owned(rlp),
+            rlp,
             ix: None,
             emulation: None,
             complete: false,
+            resource,
         }
     }
 }
 
-impl<'a> AtomicTx<'a> {
-    /// Creates a new AtomicTx from a reference to a [u8].
-    pub fn new_ref(tx_builder: TxBuilder, rlp: &'a [u8]) -> Self {
-        Self {
-            tx_builder,
-            rlp: Cow::Borrowed(rlp),
-            ix: None,
-            emulation: None,
-            complete: false,
-        }
-    }
-
+impl AtomicTx {
     pub fn tx_data(&self) -> Vec<u8> {
         let mut data = vec![emulator::Instruction::DoTx as u8];
+        data.append(&mut self.resource.fee_recipient());
         data.extend_from_slice(self.rlp.as_ref());
         data
     }
 
-    pub fn ix(&mut self, payer: &Pubkey) -> ProgramResult<()> {
+    pub fn ix(&mut self) -> ProgramResult<()> {
         let data = self.tx_data();
-        self.emulation = Some(self.tx_builder.emulate(&data, payer)?);
+        self.emulation = Some(self.tx_builder.emulate(&data, &self.resource.payer_key())?);
 
         let ix = self
             .tx_builder
@@ -61,10 +51,10 @@ impl<'a> AtomicTx<'a> {
 }
 
 #[async_trait]
-impl AdvanceTx<'_> for AtomicTx<'_> {
+impl AdvanceTx<'_> for AtomicTx {
     type Error = RomeEvmError;
 
-    fn advance(&mut self, payer: &Pubkey) -> ProgramResult<IxExecStepBatch<'static>> {
+    fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
         if self.complete {
             return Ok(IxExecStepBatch::End);
         }
@@ -72,10 +62,13 @@ impl AdvanceTx<'_> for AtomicTx<'_> {
         self.complete = true;
 
         if self.ix.is_none() {
-            self.ix(payer)?;
+            self.ix()?;
         }
         let ix = self.ix.take().unwrap();
 
         Ok(IxExecStepBatch::Single(ix))
+    }
+    fn payer(&self) -> Arc<Keypair> {
+        self.resource.payer()
     }
 }

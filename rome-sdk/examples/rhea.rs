@@ -2,12 +2,16 @@ mod common;
 
 use rome_sdk::{EthSignedTxTuple, RheaTx, Rome, RomeConfig};
 
-const CHAIN_ID: u64 = 1001;
+const CHAIN_ID: u64 = 815817419;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize the subscriber
+    tracing_subscriber::fmt::init();
+
     // Let's load the configuration
     let config = RomeConfig::load_json(common::CONFIG_PATH.parse()?).await?;
+    let rpc_url = config.solana_config.rpc_url.clone();
 
     // create ethereum wallet
     let wallet = common::create_wallet();
@@ -23,14 +27,18 @@ async fn main() -> anyhow::Result<()> {
     let rhea_tx = RheaTx::new(tx);
 
     // Let's compose a simple rollup transaction
-    let rome_tx = rome.compose_rollup_tx(rhea_tx).await?;
+    let mut rome_tx = rome.compose_rollup_tx(rhea_tx).await?;
 
     // send the transaction to the solana network
-    let signature = rome.send_and_confirm(&*rome_tx).await?;
+    let signature = rome.send_and_confirm(&mut *rome_tx).await?;
 
     // print the signature and the explorer link
-    println!("Signature: {:?}", signature);
-    println!("https://explorer.solana.com/tx/{}", signature);
+    tracing::info!("Signature: {:?}", signature);
+    tracing::info!(
+        "https://explorer.solana.com/tx/{}?cluster={}",
+        signature,
+        rpc_url
+    );
 
     // exit with success
     Ok(())

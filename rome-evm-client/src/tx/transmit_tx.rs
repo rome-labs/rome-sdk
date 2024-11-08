@@ -1,19 +1,22 @@
 use super::utils::TRANSMIT_TX_SIZE;
 use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use rome_utils::holder::Holder;
-use solana_program::{entrypoint::MAX_PERMITTED_DATA_INCREASE, pubkey::Pubkey};
+use solana_program::{entrypoint::MAX_PERMITTED_DATA_INCREASE,};
 
 use super::builder::TxBuilder;
-use crate::error::{ProgramResult, RomeEvmError};
+use crate::{
+    error::{ProgramResult, RomeEvmError}, Resource,
+};
 use async_trait::async_trait;
 use ethers::types::{Bytes, TxHash};
+use solana_sdk::signature::Keypair;
 use rome_utils::iter::into_chunks;
+use std::sync::Arc;
 
 pub struct TransmitTx {
     pub tx_builder: TxBuilder,
     pub rlp: Bytes,
     pub hash: TxHash,
-    pub holder: Holder,
+    pub resource: Resource,
     step: Steps,
 }
 
@@ -25,42 +28,30 @@ enum Steps {
 }
 
 impl TransmitTx {
-    pub fn new(tx_builder: TxBuilder, holder: Holder, rlp: Bytes, hash: TxHash) -> Self {
+    pub fn new(tx_builder: TxBuilder, resource: Resource, rlp: Bytes, hash: TxHash) -> Self {
         Self {
             tx_builder,
             rlp,
             hash,
-            holder,
+            resource,
             step: Steps::Init,
         }
     }
 
-    pub fn tx_data(
-        offset: u64,
-        bin: Vec<u8>,
-        holder: &Holder,
-        hash: TxHash,
-        chain: u64,
-    ) -> Vec<u8> {
+    pub fn tx_data(&self, offset: u64, bin: Vec<u8>) -> Vec<u8> {
         let mut data = vec![emulator::Instruction::TransmitTx as u8];
-        data.extend(holder.get_index().to_le_bytes());
+        data.extend(self.resource.holder());
         data.extend(offset.to_le_bytes());
-        data.extend(hash.as_bytes());
-        data.extend(chain.to_le_bytes());
+        data.extend(self.hash.as_bytes());
+        data.extend(self.tx_builder.chain_id.to_le_bytes());
         data.extend(bin);
 
         data
     }
 
-    fn ixs(&self, payer: &Pubkey) -> ProgramResult<Vec<OwnedAtomicIxBatch>> {
-        let data = Self::tx_data(
-            0,
-            self.rlp.to_vec(),
-            &self.holder,
-            self.hash,
-            self.tx_builder.chain_id,
-        );
-        let emulation = self.tx_builder.emulate(&data, payer)?;
+    fn ixs(&self) -> ProgramResult<Vec<OwnedAtomicIxBatch>> {
+        let data = self.tx_data(0, self.rlp.to_vec());
+        let emulation = self.tx_builder.emulate(&data, &self.resource.payer_key())?;
 
         let mut offset = 0;
 
@@ -68,13 +59,7 @@ impl TransmitTx {
             .into_iter()
             .map(|chunk| {
                 let new_offset = offset + chunk.len() as u64;
-                let data = Self::tx_data(
-                    offset,
-                    chunk,
-                    &self.holder,
-                    self.hash,
-                    self.tx_builder.chain_id,
-                );
+                let data = self.tx_data(offset, chunk);
                 offset = new_offset;
                 data
             })
@@ -89,26 +74,29 @@ impl TransmitTx {
 #[async_trait]
 impl AdvanceTx<'_> for TransmitTx {
     type Error = RomeEvmError;
-    fn advance(&mut self, payer: &Pubkey) -> ProgramResult<IxExecStepBatch<'static>> {
+    fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
         match &mut self.step {
             Steps::Init => {
-                let ixs = self.ixs(payer)?;
+                let ixs = self.ixs()?;
                 let limit = MAX_PERMITTED_DATA_INCREASE / TRANSMIT_TX_SIZE;
                 let mut batches = into_chunks(ixs, limit);
                 batches.reverse();
 
                 self.step = Steps::Execute(batches);
-                self.advance(payer)
+                self.advance()
             }
             Steps::Execute(batches) => {
                 if let Some(batch) = batches.pop() {
                     Ok(IxExecStepBatch::Parallel(batch))
                 } else {
                     self.step = Steps::Complete;
-                    self.advance(payer)
+                    self.advance()
                 }
             }
             _ => Ok(IxExecStepBatch::End),
         }
+    }
+    fn payer(&self) -> Arc<Keypair> {
+        self.resource.payer()
     }
 }

@@ -1,7 +1,8 @@
+use crate::indexer::indexed_transaction::IndexedTransaction;
 use {
     crate::{
         error::ProgramResult,
-        indexer::tx_parser::{EVMStatusCode, TxParser, GasReport},
+        indexer::tx_parser::{EVMStatusCode, GasReport, TxParser},
     },
     ethers::types::{
         transaction::eip2718::TypedTransaction, Signature as EthSignature, Transaction,
@@ -104,8 +105,13 @@ impl TransactionData {
         block_gas_used: U256,
     ) -> ProgramResult<()> {
         let new_state = if let TransactionDataState::Parsing(tx_parser) = &self.state {
-            let (transaction, receipt, gas_report) =
-                tx_parser.build(log_index, transaction_index, block_hash, block_number, block_gas_used)?;
+            let (transaction, receipt, gas_report) = tx_parser.build(
+                log_index,
+                transaction_index,
+                block_hash,
+                block_number,
+                block_gas_used,
+            )?;
             self.transaction = Some(transaction);
             self.gas_report = Some(gas_report);
             TransactionDataState::Completed(receipt)
@@ -115,25 +121,6 @@ impl TransactionData {
 
         self.state = new_state;
         Ok(())
-    }
-
-    pub fn get_transaction(&self) -> Option<&Transaction> {
-        self.transaction.as_ref()
-    }
-
-    pub fn get_transaction_with_gas_report(&self) -> Option<(&Transaction, &GasReport)> {
-        if let (Some(tx), Some(gas_report)) = (self.transaction.as_ref(), self.gas_report.as_ref()) {
-            Some((tx, gas_report))
-        } else {
-            None
-        }
-    }
-
-    pub fn get_receipt(&self) -> Option<&TransactionReceipt> {
-        match &self.state {
-            TransactionDataState::Parsing(_) => None,
-            TransactionDataState::Completed(receipt) => Some(receipt),
-        }
     }
 
     pub fn update_execute_tx(
@@ -196,12 +183,33 @@ impl TransactionData {
             TransactionDataState::Completed(_) => Ok(None),
         }
     }
+}
 
-    pub fn indexed_sol_transactions(&self) -> HashSet<SolSignature> {
+impl IndexedTransaction for TransactionData {
+    fn sol_signatures(&self) -> HashSet<SolSignature> {
         self.sol_signatures
             .iter()
             .map(|sig| sig.sol_signature)
             .collect()
+    }
+
+    fn final_slot(&self) -> Option<Slot> {
+        self.included_in_slot
+    }
+
+    fn gas_report(&self) -> Option<GasReport> {
+        self.gas_report.clone()
+    }
+
+    fn eth_transaction(&self) -> Option<Transaction> {
+        self.transaction.clone()
+    }
+
+    fn eth_receipt(&self) -> Option<TransactionReceipt> {
+        match &self.state {
+            TransactionDataState::Parsing(_) => None,
+            TransactionDataState::Completed(receipt) => Some(receipt.clone()),
+        }
     }
 }
 

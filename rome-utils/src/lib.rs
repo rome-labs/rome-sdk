@@ -4,8 +4,6 @@ pub mod auth;
 pub mod config;
 /// This module contains the implementation of the conversion functions for the hex crate.
 pub mod hex;
-/// A value holder
-pub mod holder;
 /// Utility functions for working with iterators
 pub mod iter;
 /// JsonRpc module to interact with various JSON-RPC APIs

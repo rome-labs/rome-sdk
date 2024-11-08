@@ -24,3 +24,5 @@ ethers = { workspace = true }
 
 [dev-dependencies]
 ethers = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

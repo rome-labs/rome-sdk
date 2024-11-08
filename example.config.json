@@ -1,8 +1,8 @@
 { 
     "payer_path" : "/Users/aniketprajapati/.config/solana/id.json",
-    "rpc_url" : "http://localhost:8899",
+    "rpc_url": "https://sol.devnet.romeprotocol.xyz",
     "commitment" : "confirmed",
     "rollups" : {
-        "1001": "G2bkjf2HYtQQHN7Bs2UT4YQJ6LsCKxHNRdBrrDzmvH3J"
+        "815817419": "Czg2TW7FxZWqn1x43mMBkmkYavo8b2Ybw6vDdmUQWFsp"
     }
 }

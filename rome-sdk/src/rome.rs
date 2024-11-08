@@ -1,40 +1,40 @@
 use crate::tx::{RemusTx, RheaTx};
 use crate::{RomeConfig, RomeTx};
 use ethers::types::transaction::eip2718::TypedTransaction;
-use ethers::types::Address;
-use rome_evm_client::emulator;
+use ethers::types::{Address, TransactionRequest, U256};
+use rome_evm_client::{emulator, resources::Payer};
 use rome_evm_client::error::{ProgramResult, RomeEvmError};
 use rome_evm_client::rome_evm::H160 as EvmH160;
 use rome_evm_client::tx::TxBuilder;
+use rome_evm_client::util::RomeEvmUtil;
 use rome_solana::batch::AdvanceTx;
 use rome_solana::indexers::clock::SolanaClockIndexer;
-use rome_solana::payer::SolanaKeyPayer;
 use rome_solana::tower::SolanaTower;
 use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{Keypair, Signature};
+use solana_sdk::signature::Signature;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A centralized structure that manages functionalities of the Rome network
 pub struct Rome {
-    /// Payer keypair
-    payer: Keypair,
-    /// Solana tower
+    // Payer keypair
+    // payer: Keypair,
+    // Solana tower
     solana: SolanaTower,
-    /// Mapping Chain_id to corresponding Rome-EVM transaction builder
+    /// Mapping Chai1n_id to corresponding Rome-EVM transaction builder
     rollup_builders: HashMap<u64, TxBuilder>,
 }
 
 impl Rome {
     /// Create a new instance of [Rome]
     pub fn new(
-        payer: Keypair,
+        // payer: Keypair,
         solana: SolanaTower,
         rollup_builders: HashMap<u64, TxBuilder>,
     ) -> Self {
         Self {
-            payer,
+            // payer,
             solana,
             rollup_builders,
         }
@@ -60,6 +60,7 @@ impl Rome {
 
         let solana = SolanaTower::new(async_rpc_client, clock);
 
+        let payers = Payer::from_config_list(&config.payers).await?;
         let rollup_builders = config
             .rollups
             .into_iter()
@@ -69,16 +70,17 @@ impl Rome {
                     .map(|program_id| {
                         (
                             chain_id,
-                            TxBuilder::new(chain_id, program_id, sync_rpc_client.clone()),
+                            // TODO: use its own payer list for each rollup
+                            TxBuilder::new(chain_id, program_id, sync_rpc_client.clone(), payers.clone()),
                         )
                     })
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
-        let payer = SolanaKeyPayer::read_from_file(&config.payer_path).await?;
+        // let payer = SolanaKeyPayer::read_from_file(&config.payer_path).await?;
 
         Ok(Self {
-            payer: payer.into_keypair(),
+            // payer: payer.into_keypair(),
             solana,
             rollup_builders,
         })
@@ -124,6 +126,35 @@ impl Rome {
         Ok(value)
     }
 
+    /// Estimate gas amount for a given transaction
+    ///
+    /// * `tx` - transaction request to estimate gas
+    pub fn estimate_gas(&self, tx: &TransactionRequest) -> ProgramResult<U256> {
+        // get the chain id
+        let Some(chain_id) = tx.chain_id else {
+            return Err(RomeEvmError::NoChainId);
+        };
+
+        // get the transaction builder
+        let tx_builder = self.get_transaction_builder(chain_id.as_u64())?;
+
+        // get the program id
+        let program_id = tx_builder.program_id();
+
+        // get the client
+        let client = tx_builder.client_cloned();
+
+        let emulation = emulator::eth_estimate_gas(
+            &program_id,
+            RomeEvmUtil::cast_transaction_request(tx, tx_builder.chain_id),
+            client,
+        )?;
+
+        TxBuilder::check_emulation(&emulation)?;
+
+        Ok(emulation.gas.into())
+    }
+
     /// Compose a simple rollup transaction
     pub async fn compose_rollup_tx<'a>(&self, tx: RheaTx<'a>) -> ProgramResult<RomeTx> {
         // get the transaction builder
@@ -132,10 +163,9 @@ impl Rome {
         // get relevant data
         let rlp = tx.signed_rlp_bytes();
         let hash = tx.tx().hash(tx.sig());
-        let signer = &self.payer;
 
         // build the transaction
-        builder.build_tx(rlp, hash, signer).await
+        builder.build_tx(rlp, hash).await
     }
 
     /// Compose a cross rollup transaction
@@ -150,7 +180,7 @@ impl Rome {
     ) -> anyhow::Result<Signature> {
         Ok(self
             .solana
-            .send_and_confirm_tx_iterable(tx, &self.payer)
+            .send_and_confirm_tx_iterable(tx)
             .await?
             .into_iter()
             .last()

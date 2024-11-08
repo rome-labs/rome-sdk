@@ -1,6 +1,6 @@
 use {
     ethers::types::transaction::{eip2718::TypedTransactionError, request::RequestError},
-    rome_evm::error::RomeProgramError,
+    rome_evm::{error::RomeProgramError, ExitReason},
     solana_client::client_error::ClientError,
     std::sync::PoisonError,
     thiserror::Error,
@@ -37,6 +37,9 @@ pub enum RomeEvmError {
     #[error("Revert message: {0}, data: {1:?})")]
     Revert(String, Vec<u8>),
 
+    #[error("ExitReason: {0:?}")]
+    ExitReason(ExitReason),
+
     #[error("There are no unlocked holders left")]
     NoFreeHolders,
 
@@ -46,29 +49,17 @@ pub enum RomeEvmError {
     #[error("custom error: {0}")]
     Custom(String),
 
-    #[error("emulation error: {0}")]
-    EmulationError(String),
-
-    #[error("there are no available holder accounts")]
-    NoAvailableHolders,
-
-    #[error("not enough attempts to send transaction")]
-    NotEnoughAttempts,
-
-    #[error("solana transaction can contain up to 256 accounts")]
-    TooManyAccounts,
-
     #[error("Transaction must include chainId")]
     NoChainId,
 
     #[error("Unsupported chain Id: {0}")]
     UnsupportedChainId(u64),
 
-    #[error("Cross-rollup execution is not available for given transactions")]
-    CrossRollupExecutionNotAvailable,
-
     #[error("Tokio send error")]
     TokioSendError,
+
+    #[error("Tokio Join error: {0}")]
+    JoinError(tokio::task::JoinError),
 }
 
 impl From<ClientError> for RomeEvmError {
@@ -92,5 +83,11 @@ impl From<bincode::Error> for RomeEvmError {
 impl<T> From<PoisonError<T>> for RomeEvmError {
     fn from(err: PoisonError<T>) -> RomeEvmError {
         RomeEvmError::MutexLockError(err.to_string())
+    }
+}
+
+impl From<tokio::task::JoinError> for RomeEvmError {
+    fn from(e: tokio::task::JoinError) -> RomeEvmError {
+        RomeEvmError::JoinError(e)
     }
 }

@@ -4,22 +4,25 @@ use {
         indexer::{
             ethereum_block_storage::BlockData,
             solana_block_storage::{BlockWithCommitment, SolanaBlockStorage},
-            transaction_data::TransactionResult,
-            transaction_storage::TransactionStorage,
+            transaction_storage::{BlockBuilder, TransactionStorage},
             tx_parser::decode_transaction_from_rlp,
         },
     },
     emulator::instruction::Instruction::*,
     ethers::types::{TxHash, H256, U256, U64},
     rlp::Rlp,
-    rome_evm::api::{do_tx_holder, do_tx_holder_iterative, do_tx_iterative, transmit_tx},
+    rome_evm::api::{do_tx_holder, do_tx_holder_iterative, do_tx_iterative, transmit_tx, split_fee,},
     solana_program::instruction::CompiledInstruction,
     solana_sdk::pubkey::Pubkey,
     solana_sdk::{
-        hash::Hash as SolanaHash, signature::Signature as SolSignature, slot_history::Slot,
+        hash::Hash as SolanaHash,
+        signature::Signature as SolSignature,
+        slot_history::Slot,
     },
-    solana_transaction_status::{UiConfirmedBlock, UiTransactionStatusMeta},
-    std::{str::FromStr, sync::Arc},
+    solana_transaction_status::{
+        UiConfirmedBlock, UiTransactionStatusMeta,
+    },
+    std::{collections::LinkedList, str::FromStr, sync::Arc},
 };
 
 #[derive(Debug)]
@@ -76,21 +79,21 @@ where
 pub fn cvt_solana_block_hash(block_hash: &str) -> ProgramResult<H256> {
     Ok(H256::from(
         SolanaHash::from_str(block_hash)
-            .map_err(|_| InternalError)?
+            .map_err(|_| Custom(format!("Failed to parse Solana hash from {:?}", block_hash)))?
             .to_bytes(),
     ))
 }
 
-pub struct BlockParser<'a> {
-    solana_block_storage: SolanaBlockStorage,
-    transaction_storage: &'a mut TransactionStorage,
+pub struct BlockParser<'a, S: SolanaBlockStorage, T: TransactionStorage> {
+    solana_block_storage: &'a S,
+    transaction_storage: &'a T,
     chain_id: u64,
 }
 
-impl<'a> BlockParser<'a> {
+impl<'a, S: SolanaBlockStorage, T: TransactionStorage> BlockParser<'a, S, T> {
     pub fn new(
-        solana_block_storage: SolanaBlockStorage,
-        transaction_storage: &'a mut TransactionStorage,
+        solana_block_storage: &'a S,
+        transaction_storage: &'a T,
         chain_id: u64,
     ) -> Self {
         BlockParser {
@@ -100,15 +103,21 @@ impl<'a> BlockParser<'a> {
         }
     }
 
-    fn process_do_tx(
+    fn process_do_tx<'b>(
         &mut self,
+        block: &mut T::BlockType<'b>,
         slot_number: Slot,
         tx_idx: usize,
-        sol_tx: &SolSignature,
+        sol_tx: SolSignature,
         instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<Option<TransactionResult>> {
-        let (tx, eth_sig) = decode_transaction_from_rlp(&Rlp::new(instr_data))?;
+        meta: UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, rlp) = split_fee(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        let (tx, eth_sig) = decode_transaction_from_rlp(&Rlp::new(rlp))?;
 
         let chain_id = tx
             .chain_id()
@@ -120,22 +129,23 @@ impl<'a> BlockParser<'a> {
             .as_u64();
 
         if chain_id != self.chain_id {
-            return Ok(None);
+            return Ok(());
         }
 
-        self.transaction_storage
-            .register_small_tx(slot_number, tx_idx, sol_tx, tx, eth_sig, meta)
+        block.register_small_tx(slot_number, tx_idx, sol_tx, tx, eth_sig, meta);
+        Ok(())
     }
 
-    fn process_do_tx_iterative(
+    fn process_do_tx_iterative<'b>(
         &mut self,
+        block: &mut T::BlockType<'b>,
         slot_number: Slot,
         tx_idx: usize,
-        sol_tx: &SolSignature,
+        sol_tx: SolSignature,
         instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<Option<TransactionResult>> {
-        let (_, _, rlp) = do_tx_iterative::args(instr_data).map_err(|e| {
+        meta: UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, _, _, _, rlp) = do_tx_iterative::args(instr_data).map_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
             e
         })?;
@@ -151,180 +161,174 @@ impl<'a> BlockParser<'a> {
             .as_u64();
 
         if chain_id != self.chain_id {
-            return Ok(None);
+            return Ok(());
         }
 
-        self.transaction_storage
-            .register_small_tx(slot_number, tx_idx, sol_tx, tx, eth_sig, meta)
+        block.register_small_tx(slot_number, tx_idx, sol_tx, tx, eth_sig, meta);
+        Ok(())
     }
 
-    fn process_do_tx_holder(
+    fn process_do_tx_holder<'b>(
         &mut self,
+        block: &mut T::BlockType<'b>,
         slot_number: Slot,
         tx_idx: usize,
-        sol_tx: &SolSignature,
+        sol_tx: SolSignature,
         instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<Option<TransactionResult>> {
-        let (_, hash, chain) = do_tx_holder::args(instr_data).map_err(|e| {
+        meta: UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, hash, chain, _) = do_tx_holder::args(instr_data).map_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
             e
         })?;
 
         if chain != self.chain_id {
-            return Ok(None);
+            return Ok(());
         }
 
-        self.transaction_storage.register_big_tx(
+        block.register_big_tx(
             TxHash::from_slice(hash.as_bytes()),
             slot_number,
             tx_idx,
             sol_tx,
             meta,
-        )
+        );
+        Ok(())
     }
 
-    fn process_do_tx_holder_iterative(
+    fn process_do_tx_holder_iterative<'b>(
         &mut self,
+        block: &mut T::BlockType<'b>,
         slot_number: Slot,
         tx_idx: usize,
-        sol_tx: &SolSignature,
+        sol_tx: SolSignature,
         instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<Option<TransactionResult>> {
-        let (_, hash, chain, _) = do_tx_holder_iterative::args(instr_data).map_err(|e| {
+        meta: UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, _, hash, chain, _, _) = do_tx_holder_iterative::args(instr_data).map_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
             e
         })?;
 
         if chain != self.chain_id {
-            return Ok(None);
+            return Ok(());
         }
 
-        self.transaction_storage.register_big_tx(
+        block.register_big_tx(
             TxHash::from_slice(hash.as_bytes()),
             slot_number,
             tx_idx,
             sol_tx,
             meta,
-        )
+        );
+        Ok(())
     }
 
-    fn process_transmit_tx(
+    fn process_transmit_tx<'b>(
         &mut self,
+        block: &mut T::BlockType<'b>,
         slot_number: Slot,
         tx_idx: usize,
-        sol_tx: &SolSignature,
+        sol_tx: SolSignature,
         instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<Option<TransactionResult>> {
+        meta: UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
         let (_, offset, hash, chain, chunk) = transmit_tx::args(instr_data).map_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
             e
         })?;
 
         if chain != self.chain_id {
-            return Ok(None);
+            return Ok(());
         }
 
-        self.transaction_storage.register_transmit_tx(
+        block.register_transmit_tx(
             TxHash::from_slice(hash.as_bytes()),
             slot_number,
             offset,
-            chunk,
+            chunk.to_vec(),
             tx_idx,
             sol_tx,
             meta,
-        )
+        );
+        Ok(())
     }
 
-    fn register_block(
+    async fn register_block(
         &mut self,
         slot_number: Slot,
         program_id: &Pubkey,
         solana_block: Arc<BlockWithCommitment>,
-    ) -> Vec<TxHash> {
-        let mut result = Vec::new();
+    ) -> ProgramResult<LinkedList<TxHash>> {
+        let mut block = self.transaction_storage.start_block().await?;
         parse_solana_block(&solana_block.block, program_id, |tx_idx, entry| {
             if entry.instr.data.is_empty() {
                 tracing::warn!("EVM Instruction data is empty")
             }
 
             let instr_data = &entry.instr.data[1..];
-            if let Ok(Some(tx_result)) = match entry.instr.data[0] {
-                n if n == DoTx as u8 => {
-                    self.process_do_tx(slot_number, tx_idx, entry.sol_tx, instr_data, entry.meta)
-                }
-                n if n == TransmitTx as u8 => self.process_transmit_tx(
+            if let Err(err) = match entry.instr.data[0] {
+                n if n == DoTx as u8 => self.process_do_tx(
+                    &mut block,
                     slot_number,
                     tx_idx,
-                    entry.sol_tx,
+                    entry.sol_tx.clone(),
                     instr_data,
-                    entry.meta,
+                    entry.meta.clone(),
+                ),
+                n if n == TransmitTx as u8 => self.process_transmit_tx(
+                    &mut block,
+                    slot_number,
+                    tx_idx,
+                    entry.sol_tx.clone(),
+                    instr_data,
+                    entry.meta.clone(),
                 ),
                 n if n == DoTxHolder as u8 => self.process_do_tx_holder(
+                    &mut block,
                     slot_number,
                     tx_idx,
-                    entry.sol_tx,
+                    entry.sol_tx.clone(),
                     instr_data,
-                    entry.meta,
+                    entry.meta.clone(),
                 ),
                 n if n == DoTxIterative as u8 => self.process_do_tx_iterative(
+                    &mut block,
                     slot_number,
                     tx_idx,
-                    entry.sol_tx,
+                    entry.sol_tx.clone(),
                     instr_data,
-                    entry.meta,
+                    entry.meta.clone(),
                 ),
                 n if n == DoTxHolderIterative as u8 => self.process_do_tx_holder_iterative(
+                    &mut block,
                     slot_number,
                     tx_idx,
-                    entry.sol_tx,
+                    entry.sol_tx.clone(),
                     instr_data,
-                    entry.meta,
+                    entry.meta.clone(),
                 ),
-                _ => Ok(None),
+                _ => Ok(()),
             } {
-                // Parsing can find transactions which are parts of iterative and holder
-                // transaction sequences. Only those transactions are considered included in
-                // current slot which finalization step executed during current slot
-                if let Some(included_in_slot) = tx_result.included_in_slot {
-                    if included_in_slot == slot_number {
-                        result.push(tx_result.tx_hash);
-                    }
-                }
+                tracing::warn!(
+                    "Failed to parse Solana transaction {:?}: {:?}",
+                    entry.sol_tx,
+                    err
+                )
             }
         });
 
-        result
-    }
-
-    // Helper closure checking completeness of transactions found in requested block
-    fn should_continue(&self, transactions: &Vec<TxHash>) -> bool {
-        if transactions.is_empty() {
-            return false;
-        }
-
-        for tx_hash in transactions {
-            if let Some(tx_data) = self.transaction_storage.get_transaction(tx_hash) {
-                return !tx_data.is_complete();
-            }
-        }
-
-        true
+        block.end(slot_number).await
     }
 
     pub async fn parse(
-        &mut self,
+        mut self,
         solana_slot_number: Slot,
         program_id: &Pubkey,
-        max_blocks: usize,
+        mut max_blocks: usize,
     ) -> ProgramResult<Option<Arc<BlockData>>> {
-        if let Some(mut current_block) = self
-            .solana_block_storage
-            .get_block(solana_slot_number)
-            .await?
-        {
+        max_blocks = std::cmp::min(max_blocks, solana_slot_number as usize);
+        if let Some(mut current_block) = self.solana_block_storage.get_block(solana_slot_number).await? {
             let mut current_slot = solana_slot_number;
             let block_hash = cvt_solana_block_hash(&current_block.block.blockhash)?;
             let parent_hash = cvt_solana_block_hash(&current_block.block.previous_blockhash)?;
@@ -339,51 +343,63 @@ impl<'a> BlockParser<'a> {
             // On that stage, parser finds transactions which finished in requested solana block
             // and prepares tx builder for each transaction. That means, these transactions should
             // be included into corresponding EVM block.
-            let transactions = self.register_block(current_slot, program_id, current_block.clone());
+            let tx_hashes = self
+                .register_block(current_slot, program_id, current_block.clone())
+                .await?;
 
             // Parsing stage 2 - reading previous blocks to find all iterations and holder
             // accounts data
             let mut blocks_parsed: usize = 0;
-            while blocks_parsed <= max_blocks && self.should_continue(&transactions) {
+            while blocks_parsed <= max_blocks
+                && self
+                    .transaction_storage
+                    .should_continue_parsing(&tx_hashes)
+                    .await?
+            {
                 current_slot = current_block.block.parent_slot;
                 current_block = self
                     .solana_block_storage
                     .get_block(current_block.block.parent_slot)
                     .await?
-                    .ok_or(InternalError)?;
+                    .ok_or(Custom(format!(
+                        "Failed to get block for parent slot {:?}",
+                        current_block.block.parent_slot
+                    )))?;
 
-                self.register_block(current_slot, program_id, current_block.clone());
+                self.register_block(current_slot, program_id, current_block.clone())
+                    .await?;
                 blocks_parsed += 1;
             }
 
             // Calculating block gas and preparing transaction receipts
             let mut log_index = U256::zero();
             let mut gas_used = U256::zero();
-            let transactions = transactions
-                .into_iter()
-                .enumerate()
-                .filter_map(|(tx_idx, tx_hash)| {
-                    if let Ok(Some(receipt)) = self.transaction_storage.try_finalize_transaction(
+            let mut transactions = vec![];
+            transactions.reserve(tx_hashes.len());
+
+            for (tx_idx, tx_hash) in tx_hashes.iter().enumerate() {
+                if let Ok(Some(receipt)) = self
+                    .transaction_storage
+                    .try_finalize_transaction(
                         &tx_hash,
                         log_index,
                         tx_idx,
                         block_hash,
                         block_number,
                         gas_used,
-                    ) {
-                        // Update block gas and log index from confirmed transaction
-                        log_index = log_index
-                            .checked_add(U256::from(receipt.logs.len()))
-                            .unwrap();
-                        gas_used = gas_used
-                            .checked_add(receipt.gas_used.expect("Unable to get transaction gas"))
-                            .expect("This must never happen - block gas overflow!");
-                        Some(tx_hash)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+                    )
+                    .await
+                {
+                    // Update block gas and log index from confirmed transaction
+                    log_index = log_index
+                        .checked_add(U256::from(receipt.logs.len()))
+                        .unwrap();
+                    gas_used = gas_used
+                        .checked_add(receipt.gas_used.expect("Unable to get transaction gas"))
+                        .expect("This must never happen - block gas overflow!");
+                    transactions.push(*tx_hash);
+                }
+            }
 
             Ok(Some(Arc::new(BlockData::new(
                 block_hash,
@@ -391,7 +407,7 @@ impl<'a> BlockParser<'a> {
                 block_number,
                 timestamp,
                 gas_used,
-                transactions,
+                Arc::new(transactions),
             ))))
         } else {
             Ok(None)

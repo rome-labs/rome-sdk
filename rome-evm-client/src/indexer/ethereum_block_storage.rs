@@ -1,5 +1,6 @@
+use crate::error::ProgramResult;
 use {
-    crate::{indexer::{transaction_storage::TransactionStorage, tx_parser::GasReport}},
+    crate::indexer::{transaction_storage::TransactionStorage, tx_parser::GasReport},
     ethers::{
         abi::ethereum_types::BigEndianHash,
         types::{
@@ -34,7 +35,7 @@ pub struct BlockData {
     pub number: U64,
     pub timestamp: U256,
     gas_used: U256,
-    transactions: Vec<TxHash>,
+    transactions: Arc<Vec<TxHash>>,
 }
 
 impl BlockData {
@@ -44,7 +45,7 @@ impl BlockData {
         number: U64,
         timestamp: U256,
         gas_used: U256,
-        transactions: Vec<TxHash>,
+        transactions: Arc<Vec<TxHash>>,
     ) -> Self {
         Self {
             hash,
@@ -52,7 +53,7 @@ impl BlockData {
             number,
             timestamp,
             gas_used,
-            transactions: transactions.clone(),
+            transactions: transactions,
         }
     }
 
@@ -95,53 +96,35 @@ impl BlockData {
         }
     }
 
-    pub fn get_block(
+    pub async fn get_block<T: TransactionStorage>(
         &self,
         full_transactions: bool,
-        transaction_storage: &TransactionStorage,
-    ) -> BlockType {
+        transaction_storage: &T,
+    ) -> ProgramResult<BlockType> {
         if full_transactions {
-            BlockType::BlockWithTransactions(Block::<Transaction> {
-                transactions: self
-                    .transactions
-                    .iter()
-                    .filter_map(|tx_hash| {
-                        transaction_storage
-                            .get_transaction(tx_hash)
-                            .and_then(|tx| tx.get_transaction().cloned())
-                    })
-                    .collect(),
+            Ok(BlockType::BlockWithTransactions(Block::<Transaction> {
+                transactions: transaction_storage
+                    .get_full_txs(self.transactions.clone())
+                    .await?,
                 ..self.get_block_base()
-            })
+            }))
         } else {
-            BlockType::BlockWithHashes(Block::<TxHash> {
-                transactions: self
-                    .transactions
-                    .iter()
-                    .filter_map(|tx_hash| {
-                        transaction_storage
-                            .get_transaction(tx_hash)
-                            .and_then(|tx| tx.get_transaction().map(|_| *tx_hash))
-                    })
-                    .collect(),
+            Ok(BlockType::BlockWithHashes(Block::<TxHash> {
+                transactions: transaction_storage
+                    .get_txs(self.transactions.clone())
+                    .await?,
                 ..self.get_block_base()
-            })
+            }))
         }
     }
 
-    pub fn get_transactions(&self, transaction_storage: &TransactionStorage) -> Vec<(Transaction, GasReport)> {
-        self.transactions
-            .iter()
-            .filter_map(|tx_hash| {
-                transaction_storage
-                    .get_transaction(tx_hash)
-                    .map_or(None, |tx|
-                        tx.get_transaction_with_gas_report().map(
-                            |(tx, gas_report)| (tx.clone(), gas_report.clone())
-                        ),
-                    )
-            })
-            .collect()
+    pub async fn get_transactions<T: TransactionStorage>(
+        &self,
+        transaction_storage: &T,
+    ) -> ProgramResult<Vec<(Transaction, GasReport)>> {
+        transaction_storage
+            .get_full_txs_with_gas_report(self.transactions.clone())
+            .await
     }
 }
 

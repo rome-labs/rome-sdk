@@ -2,7 +2,7 @@ use {
     crate::{
         error::{
             ProgramResult,
-            RomeEvmError::{InternalError, TypedTransactionError},
+            RomeEvmError::TypedTransactionError,
         },
         indexer::log_parser::LogParser,
     },
@@ -16,6 +16,7 @@ use {
     solana_transaction_status::{option_serializer::OptionSerializer, UiTransactionStatusMeta},
     std::{collections::BTreeMap, ops::Add},
 };
+use crate::error::RomeEvmError::Custom;
 
 #[derive(Default, Debug, Clone)]
 pub struct GasReport {
@@ -89,10 +90,7 @@ pub fn calc_contract_address(
         let hash = hash(&rlp.out());
         Some(Address::from(H256::from(hash.to_bytes())))
     })
-    .ok_or_else(|| {
-        tracing::error!("from address is expected to be something");
-        InternalError
-    })
+    .ok_or_else(|| Custom("from address is not set".to_string()))
 }
 
 pub fn decode_transaction_from_rlp(rlp: &Rlp) -> ProgramResult<(TypedTransaction, EthSignature)> {
@@ -222,7 +220,12 @@ impl TxParser {
                 let mut parser = LogParser::new();
                 parser.parse(logs)?;
 
-                (parser.events, parser.exit_reason, parser.gas_value, parser.gas_recipient)
+                (
+                    parser.events,
+                    parser.exit_reason,
+                    parser.gas_value,
+                    parser.gas_recipient,
+                )
             }
             _ => (vec![], None, None, None),
         };
@@ -245,7 +248,10 @@ impl TxParser {
         }
 
         if let Some(gas_value) = gas_value {
-            self.set_gas_report(GasReport{ gas_value, gas_recipient });
+            self.set_gas_report(GasReport {
+                gas_value,
+                gas_recipient,
+            });
         }
 
         Ok(status)
@@ -260,8 +266,7 @@ impl TxParser {
         block_gas_used: U256,
     ) -> ProgramResult<(Transaction, TransactionReceipt, GasReport)> {
         if !self.is_complete() {
-            tracing::warn!("Transaction parser is not complete");
-            return Err(InternalError);
+            return Err(Custom("Transaction parser is not complete".to_string()));
         }
 
         let (tx_request, eth_signature, logs, status, gas_report) = match self {
@@ -304,7 +309,7 @@ impl TxParser {
         let receipt = TransactionReceipt {
             transaction_hash,
             transaction_index,
-            transaction_type: transaction.transaction_type,
+            transaction_type: Some(transaction.transaction_type.unwrap_or(U64::zero())),
             block_hash: Some(block_hash),
             block_number: Some(block_number),
             from: transaction.from,

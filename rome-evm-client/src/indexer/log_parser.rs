@@ -1,10 +1,12 @@
 use crate::error::{ProgramResult, RomeEvmError::LogParserError};
 use ethers::{
     abi::{self, ParamType},
-        types::{Address, Log, H256, U256},
+    types::{Address, Log, H256, U256},
     utils::hex,
 };
-use rome_evm::{EVENT_LOG, EXIT_REASON, H160, REVERT_ERROR, REVERT_PANIC, GAS_VALUE, GAS_RECIPIENT};
+use rome_evm::{
+    EVENT_LOG, EXIT_REASON, GAS_RECIPIENT, GAS_VALUE, H160, REVERT_ERROR, REVERT_PANIC,
+};
 use std::mem::size_of;
 
 pub trait Parser {
@@ -46,7 +48,7 @@ pub enum GasReportState {
     GasValue,
     GasRecipient,
     GasValueFound,
-    GasRecipientFound
+    GasRecipientFound,
 }
 
 #[derive(Default, Debug)]
@@ -142,18 +144,14 @@ impl Parser for EventParser {
             }
             EventState::Address => {
                 if item.len() != size_of::<H160>() {
-                    return Err(LogParserError(
-                        "event log: address expected".to_string(),
-                    ));
+                    return Err(LogParserError("event log: address expected".to_string()));
                 };
                 self.event.address = Address::from_slice(&item);
                 self.state = EventState::TopicsLen;
             }
             EventState::TopicsLen => {
                 if item.len() != size_of::<u8>() {
-                    return Err(LogParserError(
-                        "event log: topics_len expected".to_string(),
-                    ));
+                    return Err(LogParserError("event log: topics_len expected".to_string()));
                 };
                 self.topics_len = item[0] as usize;
                 if self.topics_len > 0 {
@@ -164,9 +162,7 @@ impl Parser for EventParser {
             }
             EventState::Topics => {
                 if item.len() != size_of::<rome_evm::H256>() {
-                    return Err(LogParserError(
-                        "event log: topic expected".to_string(),
-                    ));
+                    return Err(LogParserError("event log: topic expected".to_string()));
                 };
                 self.event.topics.push(H256::from_slice(&item));
                 if self.event.topics.len() == self.topics_len {
@@ -212,9 +208,7 @@ impl Parser for ExitReasonParser {
             }
             ExitReasonState::Code => {
                 if item.len() != size_of::<u8>() {
-                    return Err(LogParserError(
-                        "exit reason: code expected".to_string(),
-                    ));
+                    return Err(LogParserError("exit reason: code expected".to_string()));
                 };
                 self.exit_reason.code = item[0];
                 self.state = ExitReasonState::ReasonLen;
@@ -317,7 +311,7 @@ impl Parser for GasValueParser {
                 self.gas_value = U256::from_big_endian(item.as_slice());
                 self.state = GasReportState::GasValueFound;
             }
-            _ => {},
+            _ => {}
         }
 
         Ok(())
@@ -357,7 +351,7 @@ impl Parser for GasRecipientParser {
                 self.recipient = Some(Address::from_slice(item.as_slice()));
                 self.state = GasReportState::GasRecipientFound;
             }
-            _ => {},
+            _ => {}
         }
 
         Ok(())
