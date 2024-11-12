@@ -2,8 +2,8 @@ mod common;
 
 use rome_sdk::{RemusTx, Rome, RomeConfig};
 
-const CHAIN_ID_FIRST: u64 = 1;
-const CHAIN_ID_SECOND: u64 = 2;
+const CHAIN_ID_FIRST: u64 = 200001;
+const CHAIN_ID_SECOND: u64 = 1003;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

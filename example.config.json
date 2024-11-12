@@ -1,8 +1,14 @@
-{ 
-    "payer_path" : "/Users/aniketprajapati/.config/solana/id.json",
-    "rpc_url": "https://sol.devnet.romeprotocol.xyz",
-    "commitment" : "confirmed",
-    "rollups" : {
-        "815817419": "Czg2TW7FxZWqn1x43mMBkmkYavo8b2Ybw6vDdmUQWFsp"
-    }
+{
+    "rpc_url": "https://apius.devnet.romeprotocol.xyz",
+    "commitment": "confirmed",
+    "rollups": {
+        "1003": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S",
+        "200001": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S"
+    },
+    "payers": [
+        {
+            "payer_keypair": "/Users/username/.config/solana/id.json",
+            "number_holders": 64
+        }
+    ]
 }

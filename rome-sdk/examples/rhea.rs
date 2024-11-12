@@ -2,7 +2,7 @@ mod common;
 
 use rome_sdk::{EthSignedTxTuple, RheaTx, Rome, RomeConfig};
 
-const CHAIN_ID: u64 = 815817419;
+const CHAIN_ID: u64 = 200001;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
