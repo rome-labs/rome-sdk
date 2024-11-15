@@ -2,8 +2,10 @@
     "rpc_url": "https://apius.devnet.romeprotocol.xyz",
     "commitment": "confirmed",
     "rollups": {
-        "1003": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S",
-        "200001": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S"
+        "200002": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S",
+        "200003": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S",
+        "200004": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S",
+        "200005": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S"
     },
     "payers": [
         {

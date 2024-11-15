@@ -7,7 +7,7 @@ use rome_sdk::{EthSignedTxTuple, Rome};
 pub const CONFIG_PATH: &str = "./example.config.json";
 pub const EXAMPLE_WALLET: &str = "ed234d0929176fc58f699be15c7f606f745223d93ceb3b4042e55e825484c043";
 /// Derived from the private key above
-pub const EXAMPLE_WALLET_ADDRESS: &str = "0xae600d1f94680ef43ab12f8d618f8aafc208fe25";
+// pub const EXAMPLE_WALLET_ADDRESS: &str = "0xae600d1f94680ef43ab12f8d618f8aafc208fe25";
 
 pub const TO_ADDRESS: &str = "0xb94f5374fce5edbc8e2a8697c15331677e6ebf0b";
 

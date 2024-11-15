@@ -2,7 +2,7 @@ mod common;
 
 use rome_sdk::{EthSignedTxTuple, RheaTx, Rome, RomeConfig};
 
-const CHAIN_ID: u64 = 200001;
+const CHAIN_ID: u64 = 200002;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,7 +11,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Let's load the configuration
     let config = RomeConfig::load_json(common::CONFIG_PATH.parse()?).await?;
-    let rpc_url = config.solana_config.rpc_url.clone();
 
     // create ethereum wallet
     let wallet = common::create_wallet();
@@ -37,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         "https://explorer.solana.com/tx/{}?cluster={}",
         signature,
-        rpc_url
+        "devnet",
     );
 
     // exit with success

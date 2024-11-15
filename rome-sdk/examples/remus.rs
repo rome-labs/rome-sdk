@@ -2,11 +2,14 @@ mod common;
 
 use rome_sdk::{RemusTx, Rome, RomeConfig};
 
-const CHAIN_ID_FIRST: u64 = 200001;
-const CHAIN_ID_SECOND: u64 = 1003;
+const CHAIN_ID_FIRST: u64 = 200003;
+const CHAIN_ID_SECOND: u64 = 200004;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize the subscriber
+    tracing_subscriber::fmt::init();
+
     // Let's load the configuration
     let config = RomeConfig::load_json(common::CONFIG_PATH.parse()?).await?;
 
@@ -34,8 +37,12 @@ async fn main() -> anyhow::Result<()> {
     let signature = rome.send_and_confirm(&mut *rome_tx).await?;
 
     // print the signature and the explorer link
-    println!("Signature: {:?}", signature);
-    println!("https://explorer.solana.com/tx/{}", signature);
+    tracing::info!("Signature: {:?}", signature);
+    tracing::info!(
+        "https://explorer.solana.com/tx/{}?cluster={}",
+        signature,
+        "devnet",
+    );
 
     // exit with success
     Ok(())

@@ -1,7 +1,8 @@
-use crate::{error::{ProgramResult, RomeEvmError}, indexer::log_parser,
-            tx::{
-                utils::build_solana_tx, AtomicTx, AtomicTxHolder, IterativeTx, IterativeTxHolder
-            }, Payer, ResourceFactory, Resource,
+use crate::{
+    error::{ProgramResult, RomeEvmError},
+    indexer::log_parser,
+    tx::{utils::build_solana_tx, AtomicTx, AtomicTxHolder, IterativeTx, IterativeTxHolder},
+    Payer, Resource, ResourceFactory,
 };
 use bincode::serialize;
 use emulator::{emulate, Emulation};
@@ -15,9 +16,7 @@ use solana_program::{
     hash::Hash,
     instruction::{AccountMeta, Instruction},
 };
-use solana_sdk::{
-    bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey, transaction::Transaction,
-};
+use solana_sdk::{bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey, transaction::Transaction};
 use solana_transaction_status::UiTransactionEncoding;
 
 /// Transaction Builder for Rome EVM
@@ -98,18 +97,13 @@ impl TxBuilder {
         rlp: Bytes,
         tx_hash: TxHash,
     ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
-
         let ix = atomic_tx.ix.as_ref().unwrap();
         let tx = build_solana_tx(Hash::default(), &atomic_tx.resource.payer(), ix)?;
 
         if is_holder_needed(&tx)? {
             tracing::info!("Atomic Tx Holder needed");
-            let atomix_tx_holder = AtomicTxHolder::new(
-                self.clone(),
-                atomic_tx.resource,
-                rlp,
-                tx_hash
-            );
+            let atomix_tx_holder =
+                AtomicTxHolder::new(self.clone(), atomic_tx.resource, rlp, tx_hash);
 
             Ok(Box::new(atomix_tx_holder))
         } else {
@@ -125,7 +119,6 @@ impl TxBuilder {
         rlp: Bytes,
         tx_hash: TxHash,
     ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
-
         let mut iterative_tx = IterativeTx::new(self.clone(), resource, rlp.clone())?;
         iterative_tx.ixs()?;
         let ixs = iterative_tx.ixs.as_ref().unwrap();
@@ -139,12 +132,8 @@ impl TxBuilder {
         if is_holder_needed(&tx)? {
             tracing::info!("Iterative Tx Holder needed");
 
-            let iterative_tx_holder = IterativeTxHolder::new(
-                self.clone(),
-                iterative_tx.resource,
-                rlp,
-                tx_hash
-            );
+            let iterative_tx_holder =
+                IterativeTxHolder::new(self.clone(), iterative_tx.resource, rlp, tx_hash);
 
             Ok(Box::new(iterative_tx_holder))
         } else {
@@ -161,7 +150,6 @@ impl TxBuilder {
         rlp: Bytes,
         tx_hash: TxHash,
     ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
-
         // Lock a holder, payer
         let resource = self.lock_resource().await?;
         let mut atomic_tx = AtomicTx::new(self.clone(), rlp.to_vec(), resource);
@@ -169,6 +157,11 @@ impl TxBuilder {
         atomic_tx.ix()?;
         let emulation = atomic_tx.emulation.as_ref().unwrap();
         let vm = emulation.vm.as_ref().expect("Vm expected");
+
+        println!(
+            "VM steps executed: {}, allocated: {}, syscalls: {}",
+            vm.steps_executed, emulation.allocated, emulation.syscalls
+        );
 
         let is_atomic_tx = vm.steps_executed <= NUMBER_OPCODES_PER_TX
             && emulation.allocated <= MAX_PERMITTED_DATA_INCREASE
@@ -219,7 +212,7 @@ impl TxBuilder {
             payer,
             self.client_cloned(),
             self.chain_id,
-            session
+            session,
         )?)
     }
 }

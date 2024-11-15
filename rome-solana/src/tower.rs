@@ -35,7 +35,11 @@ impl SolanaTower {
         &self.clock
     }
 
-    async fn to_tx<'a>(&self, ixs: &'a AtomicIxBatch<'a>, payer: &Keypair) -> ClientResult<Transaction> {
+    async fn to_tx<'a>(
+        &self,
+        ixs: &'a AtomicIxBatch<'a>,
+        payer: &Keypair,
+    ) -> ClientResult<Transaction> {
         let blockhash = self.client.get_latest_blockhash().await?;
         Ok(ixs.compose_solana_tx(payer, blockhash))
     }
@@ -117,6 +121,8 @@ impl SolanaTower {
         &self,
         tx: &mut dyn AdvanceTx<'_, Error = Error>,
     ) -> anyhow::Result<Vec<Signature>> {
+        println!("send_and_confirm_tx_iterable\n");
+
         let payer = tx.payer();
         let mut sigs = Vec::new();
         let mut unchecked_sigs = Vec::new();
