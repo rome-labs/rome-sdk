@@ -3,16 +3,18 @@ use ethers::types::{
     transaction::eip2718::TypedTransaction, Address, Bytes, Eip1559TransactionRequest,
     Eip2930TransactionRequest, NameOrAddress, TransactionRequest, TxHash, H256, U256, U64,
 };
+use rome_utils::jsonrpc::JsonRpcResponse;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use rome_utils::jsonrpc::JsonRpcResponse;
 
 /// Channel to send transactions to the mempool
-pub type GethTxPoolSender = tokio::sync::mpsc::UnboundedSender<Arc<JsonRpcResponse<GethTxPoolResult>>>;
+pub type GethTxPoolSender =
+    tokio::sync::mpsc::UnboundedSender<Arc<JsonRpcResponse<GethTxPoolResult>>>;
 
 /// Channel to receive transactions from the mempool
-pub type GethTxPoolReceiver = tokio::sync::mpsc::UnboundedReceiver<Arc<JsonRpcResponse<GethTxPoolResult>>>;
+pub type GethTxPoolReceiver =
+    tokio::sync::mpsc::UnboundedReceiver<Arc<JsonRpcResponse<GethTxPoolResult>>>;
 
 /// Represents a transaction in the Geth transaction pool.
 #[derive(Debug, Deserialize, Serialize, Clone)]

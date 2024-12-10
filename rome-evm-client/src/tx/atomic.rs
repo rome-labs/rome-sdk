@@ -1,10 +1,13 @@
 use super::builder::TxBuilder;
-use crate::{error::{ProgramResult, RomeEvmError}, Resource};
+use crate::{
+    error::{ProgramResult, RomeEvmError},
+    Resource,
+};
 use async_trait::async_trait;
 use emulator::Emulation;
 use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use std::sync::Arc;
 use solana_sdk::signature::Keypair;
+use std::sync::Arc;
 
 /// A simple atomic transaction
 pub struct AtomicTx {

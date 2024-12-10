@@ -1,6 +1,7 @@
 mod atomic;
 mod atomic_holder;
 mod builder;
+mod cross_chain_atomic;
 mod cross_rollup_atomic;
 mod iterative;
 mod iterative_holder;
@@ -10,6 +11,7 @@ pub mod utils;
 use atomic::*;
 pub use atomic_holder::*;
 pub use builder::*;
+pub use cross_chain_atomic::*;
 pub use cross_rollup_atomic::*;
 pub use iterative::*;
 pub use iterative_holder::*;

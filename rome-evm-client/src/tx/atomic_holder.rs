@@ -2,7 +2,8 @@ use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
 
 use super::{builder::TxBuilder, TransmitTx};
 use crate::{
-    error::{ProgramResult, RomeEvmError}, Resource
+    error::{ProgramResult, RomeEvmError},
+    Resource,
 };
 use async_trait::async_trait;
 use ethers::types::{Bytes, TxHash};
@@ -40,10 +41,10 @@ impl AtomicTxHolder {
     }
     fn ixs(&self) -> ProgramResult<OwnedAtomicIxBatch> {
         let data = self.tx_data();
-        let emulation = self.transmit_tx.tx_builder.emulate(
-            &data,
-            &self.transmit_tx.resource.payer_key()
-        )?;
+        let emulation = self
+            .transmit_tx
+            .tx_builder
+            .emulate(&data, &self.transmit_tx.resource.payer_key())?;
         let ix = self.transmit_tx.tx_builder.build_ix(&emulation, data);
 
         Ok(OwnedAtomicIxBatch::new_composible_owned(ix))

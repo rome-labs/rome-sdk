@@ -1,6 +1,5 @@
 use crate::{
     error::{ProgramResult, RomeEvmError},
-    indexer::log_parser,
     tx::{utils::build_solana_tx, AtomicTx, AtomicTxHolder, IterativeTx, IterativeTxHolder},
     Payer, Resource, ResourceFactory,
 };
@@ -16,8 +15,12 @@ use solana_program::{
     hash::Hash,
     instruction::{AccountMeta, Instruction},
 };
-use solana_sdk::{bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey, transaction::Transaction};
+use solana_sdk::{bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey};
 use solana_transaction_status::UiTransactionEncoding;
+
+use crate::indexer::parsers::log_parser;
+use rome_solana::batch::OwnedAtomicIxBatch;
+use solana_sdk::signer::keypair::Keypair;
 
 /// Transaction Builder for Rome EVM
 #[derive(Clone)]
@@ -98,9 +101,8 @@ impl TxBuilder {
         tx_hash: TxHash,
     ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
         let ix = atomic_tx.ix.as_ref().unwrap();
-        let tx = build_solana_tx(Hash::default(), &atomic_tx.resource.payer(), ix)?;
 
-        if is_holder_needed(&tx)? {
+        if use_holder(ix, &atomic_tx.resource.payer())? {
             tracing::info!("Atomic Tx Holder needed");
             let atomix_tx_holder =
                 AtomicTxHolder::new(self.clone(), atomic_tx.resource, rlp, tx_hash);
@@ -121,15 +123,14 @@ impl TxBuilder {
     ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
         let mut iterative_tx = IterativeTx::new(self.clone(), resource, rlp.clone())?;
         iterative_tx.ixs()?;
-        let ixs = iterative_tx.ixs.as_ref().unwrap();
+        let ix = iterative_tx
+            .ixs
+            .as_ref()
+            .unwrap()
+            .last()
+            .expect("no instructions in iterative Tx");
 
-        let tx = build_solana_tx(
-            Hash::default(),
-            &iterative_tx.resource.payer(),
-            ixs.last().expect("no instructions in iterative Tx"),
-        )?;
-
-        if is_holder_needed(&tx)? {
+        if use_holder(ix, &iterative_tx.resource.payer())? {
             tracing::info!("Iterative Tx Holder needed");
 
             let iterative_tx_holder =
@@ -153,6 +154,7 @@ impl TxBuilder {
         // Lock a holder, payer
         let resource = self.lock_resource().await?;
         let mut atomic_tx = AtomicTx::new(self.clone(), rlp.to_vec(), resource);
+
         // Build the instruction
         atomic_tx.ix()?;
         let emulation = atomic_tx.emulation.as_ref().unwrap();
@@ -217,8 +219,18 @@ impl TxBuilder {
     }
 }
 
-fn is_holder_needed(tx: &Transaction) -> ProgramResult<bool> {
-    let json = serialize_encode(tx, UiTransactionEncoding::Base64)?;
+fn use_holder(ix: &OwnedAtomicIxBatch, payer: &Keypair) -> ProgramResult<bool> {
+    let data_len = ix
+        .iter()
+        .map(|a| a.data.len())
+        .fold(0_usize, |sum, len| sum + len);
+
+    if data_len > i16::MAX as usize {
+        return Ok(true);
+    }
+
+    let tx = build_solana_tx(Hash::default(), payer, ix)?;
+    let json = serialize_encode(&tx, UiTransactionEncoding::Base64)?;
     Ok(json.len() > PACKET_DATA_SIZE)
 }
 

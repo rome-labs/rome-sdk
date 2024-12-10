@@ -6,6 +6,7 @@ edition = "2021"
 description = "Geth related functionality to access and advance rollup state"
 
 [dependencies]
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 rome-utils = { workspace = true }
 tracing = { workspace = true }

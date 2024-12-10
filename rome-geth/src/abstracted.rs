@@ -1,8 +1,7 @@
-use url::Url;
+use super::types::GethTxPoolSender;
 use crate::indexers::pending_txs::GethPendingTxsIndexer;
 use rome_utils::services::ServiceRunner;
-use super::types::GethTxPoolSender;
-
+use url::Url;
 
 /// Subscribe to the rollup mempool
 pub async fn subscribe_to_rollup(

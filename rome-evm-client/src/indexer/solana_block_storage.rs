@@ -1,27 +1,16 @@
-use async_trait::async_trait;
+use std::collections::BTreeMap;
 use {
-    crate::error::ProgramResult,
-    solana_sdk::{commitment_config::CommitmentLevel, slot_hashes::Slot},
-    solana_transaction_status::UiConfirmedBlock,
-    std::sync::Arc,
+    crate::error::ProgramResult, async_trait::async_trait, solana_sdk::clock::Slot,
+    solana_transaction_status::UiConfirmedBlock, std::sync::Arc,
 };
-
-pub struct BlockWithCommitment {
-    #[allow(dead_code)]
-    pub commitment_level: CommitmentLevel,
-    pub block: UiConfirmedBlock,
-}
 
 #[async_trait]
 pub trait SolanaBlockStorage: Send + Sync {
-    async fn set_block(
-        &self,
-        slot_number: Slot,
-        block: Arc<BlockWithCommitment>,
-    ) -> ProgramResult<()>;
+    async fn store_blocks(&self, blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>) -> ProgramResult<()>;
 
-    async fn get_block(&self, slot_number: Slot)
-        -> ProgramResult<Option<Arc<BlockWithCommitment>>>;
+    async fn get_block(&self, slot_number: Slot) -> ProgramResult<Option<Arc<UiConfirmedBlock>>>;
 
-    async fn remove_blocks_before(&self, slot_slot: Slot) -> ProgramResult<()>;
+    async fn retain_from_slot(&self, from_slot: Slot) -> ProgramResult<()>;
+
+    async fn get_last_slot(&self) -> ProgramResult<Option<Slot>>;
 }

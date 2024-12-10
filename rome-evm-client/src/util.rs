@@ -24,7 +24,7 @@ impl RomeEvmUtil {
                 NameOrAddress::Name(_) => EvmH160::default(),
             }),
             value: value.value.map(Self::cast_u256).unwrap_or_default(),
-            data: value.data.clone().unwrap_or_default().to_vec(),
+            data: Some(value.data.clone().unwrap_or_default().to_vec()),
             chain_id: value
                 .chain_id
                 .map(|a| a.as_u64().into())

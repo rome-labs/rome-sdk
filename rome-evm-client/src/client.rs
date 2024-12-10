@@ -1,21 +1,25 @@
 use rome_solana::tower::SolanaTower;
 use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
-use tokio::sync::oneshot;
+use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 
 use crate::error::{ProgramResult, RomeEvmError};
-use crate::indexer::transaction_storage::TransactionStorage;
 use crate::indexer::{
-    ethereum_block_storage::{BlockType, EthereumBlockStorage},
-    indexer::Indexer,
-    solana_block_storage::SolanaBlockStorage,
+    BlockParams, BlockProducer, PendingBlocks, ProducedBlocks, SolanaBlockStorage,
+    StandaloneIndexer,
 };
+use crate::indexer::{BlockType, EthereumBlockStorage};
 use crate::tx::TxBuilder;
 use crate::util::RomeEvmUtil;
+use crate::Payer;
+use async_trait::async_trait;
 use emulator::{Emulation, Instruction};
 use ethers::types::{
-    Address, BlockId, BlockNumber, Bytes, FeeHistory, TransactionRequest, TxHash, H256, U256, U64,
+    Address, BlockId, BlockNumber, Bytes, FeeHistory, Transaction as EthTransaction,
+    TransactionReceipt, TransactionRequest, TxHash, H256, U256, U64,
 };
 use ethers::utils::keccak256;
+use rome_evm::OwnerInfo;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     clock::Slot,
@@ -25,31 +29,74 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::sync::Arc;
-use rome_evm::OwnerInfo;
-use crate::Payer;
+use tokio::{
+    sync::{oneshot, RwLock},
+    task::JoinHandle,
+};
 
 /// Client component interacting with the instance of Rome-EVM smart-contract on Solana blockchain
 /// (Rome-EVM Rollup).
 ///
 /// Interface of RomeEVMClient is designed to be closely compatible with standard Ethereum JSON RPC
 /// and mostly repeats its functionality.
-pub struct RomeEVMClient<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> {
-    /// Rollup indexer
-    indexer: Arc<Indexer<S, T>>,
+pub struct RomeEVMClient<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> {
+    solana_block_storage: Arc<S>,
 
-    /// Ethereum block stPayerListorage
-    ethereum_block_storage: EthereumBlockStorage,
+    ethereum_block_storage: Arc<E>,
 
-    /// Transaction builder
     tx_builder: TxBuilder,
 
-    /// Solana Tower
     solana: SolanaTower,
+
+    commitment_level: CommitmentLevel,
+
+    genesis_timestamp: U256,
 }
 
 const INDEXING_INTERVAL_MS: u64 = 400;
 
-impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMClient<S, T> {
+#[derive(Clone)]
+struct ClientBlockRegistrator {
+    last_number: Arc<RwLock<u64>>,
+}
+
+impl ClientBlockRegistrator {
+    fn new() -> Self {
+        Self {
+            last_number: Arc::new(RwLock::new(1)),
+        }
+    }
+}
+
+#[async_trait]
+impl BlockProducer for ClientBlockRegistrator {
+    async fn produce_blocks(
+        &self,
+        mut parent_hash: Option<TxHash>,
+        pending_blocks: &PendingBlocks,
+    ) -> ProgramResult<ProducedBlocks> {
+        let mut lock = self.last_number.write().await;
+        let mut results = BTreeMap::new();
+        for (block_id, pending_block) in pending_blocks {
+            let blockhash = H256::random();
+            results.insert(
+                *block_id,
+                BlockParams {
+                    hash: blockhash,
+                    parent_hash,
+                    number: U64::from(*lock.deref()),
+                    timestamp: U256::from(pending_block.slot_timestamp.unwrap_or_default()),
+                },
+            );
+            *lock.deref_mut() += 1;
+            parent_hash = Some(blockhash);
+        }
+
+        Ok(results)
+    }
+}
+
+impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVMClient<S, E> {
     /// Constructor
     ///
     /// * `chain_id` - Chain ID of a Rollup
@@ -64,78 +111,57 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
     /// * `token` - token to call Graceful Shutdown of the async tasks
     ///
     /// Returns tuple (<Client_instance, Run_future>)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        chain_id: u64,
         program_id: Pubkey,
         solana: SolanaTower,
         commitment_level: CommitmentLevel,
-        solana_block_storage: S,
-        transaction_storage: T,
+        solana_block_storage: Arc<S>,
+        ethereum_block_storage: Arc<E>,
         payers: Vec<Payer>,
     ) -> Self {
+        let chain_id = ethereum_block_storage.chain();
         let sync_client = Arc::new(RpcClient::new_with_commitment(
             solana.client().url(),
             solana.client().commitment(),
         ));
 
         Self {
-            indexer: Arc::new(Indexer::new(
-                program_id,
-                solana_block_storage,
-                transaction_storage,
-                solana.client_cloned(),
-                commitment_level,
-                chain_id,
-            )),
-            ethereum_block_storage: EthereumBlockStorage::new(),
+            solana_block_storage,
+            ethereum_block_storage,
             tx_builder: TxBuilder::new(chain_id, program_id, sync_client, payers),
             solana,
+            commitment_level,
+            genesis_timestamp: U256::from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            ),
         }
     }
 
     /// Start the indexer and consume blocks
     pub async fn start_indexing(
         &self,
-        start_slot: Slot,
+        start_slot: Option<Slot>,
         idx_started_oneshot: Option<oneshot::Sender<()>>,
-    ) {
-        let (block_sender, mut block_receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        let recv_loop_jh = {
-            let ethereum_block_storage = self.ethereum_block_storage.clone();
-
-            tokio::spawn(async move {
-                tracing::info!("Block consumer started");
-
-                while let Some(block) = block_receiver.recv().await {
-                    ethereum_block_storage.set_block(block).await;
-                }
-            })
-        };
-
-        let indexer_jh = {
-            let indexer = self.indexer.clone();
-
-            tokio::spawn(async move {
-                indexer
-                    .start(
-                        start_slot,
-                        INDEXING_INTERVAL_MS,
-                        block_sender,
-                        idx_started_oneshot,
-                    )
-                    .await
-            })
-        };
-
-        tokio::select! {
-            res = indexer_jh => {
-                tracing::info!("Indexer stopped: {:?}", res);
-            },
-            res = recv_loop_jh => {
-                tracing::info!("Block consumer stopped: {:?}", res);
-            }
+        max_slot_history: Option<Slot>,
+    ) -> JoinHandle<()> {
+        StandaloneIndexer {
+            solana_client: self.solana.client_cloned(),
+            commitment_level: self.commitment_level,
+            rome_evm_pubkey: *self.program_id(),
+            solana_block_storage: self.solana_block_storage.clone(),
+            ethereum_block_storage: self.ethereum_block_storage.clone(),
+            block_producer: ClientBlockRegistrator::new(),
         }
+        .start_indexing(
+            start_slot,
+            idx_started_oneshot,
+            INDEXING_INTERVAL_MS,
+            max_slot_history,
+        )
     }
 
     /// Executes transaction in a Rollup smart-contract
@@ -181,10 +207,10 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
 
     /// Returns latest block number
     pub async fn block_number(&self) -> ProgramResult<U64> {
-        if let Some(block_number) = self.ethereum_block_storage.latest_block().await {
+        if let Some(block_number) = self.ethereum_block_storage.latest_block().await? {
             Ok(block_number)
         } else {
-            Err(RomeEvmError::Custom("Indexer is not started".to_string()))
+            Ok(U64::zero())
         }
     }
 
@@ -228,7 +254,7 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
     pub fn estimate_gas(&self, call: &TransactionRequest) -> ProgramResult<U256> {
         let emulation = emulator::eth_estimate_gas(
             self.program_id(),
-            RomeEvmUtil::cast_transaction_request(&call, self.tx_builder.chain_id),
+            RomeEvmUtil::cast_transaction_request(call, self.tx_builder.chain_id),
             self.sync_rpc_client(),
         )?;
         TxBuilder::check_emulation(&emulation)?;
@@ -237,18 +263,23 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
     }
 
     async fn get_block_number(&self, block_number: BlockId) -> ProgramResult<Option<U64>> {
-        Ok(match block_number {
+        match block_number {
             BlockId::Number(number) => match number {
-                BlockNumber::Latest => self.ethereum_block_storage.latest_block().await,
-                BlockNumber::Number(number) => Some(number),
-                other => return Err(RomeEvmError::Custom(format!("Block tag {:?} not supported", other))),
+                BlockNumber::Latest => {
+                    if let Some(latest) = self.ethereum_block_storage.latest_block().await? {
+                        Ok(Some(latest))
+                    } else {
+                        Ok(Some(U64::zero()))
+                    }
+                }
+                BlockNumber::Number(number) => Ok(Some(number)),
+                other => Err(RomeEvmError::Custom(format!(
+                    "Block tag {:?} not supported",
+                    other
+                ))),
             },
-            BlockId::Hash(hash) => self
-                .ethereum_block_storage
-                .get_block_by_hash(hash)
-                .await
-                .map(|block| block.number),
-        })
+            BlockId::Hash(hash) => self.ethereum_block_storage.get_block_number(&hash).await,
+        }
     }
 
     /// Returns a collection of historical gas information for a specified number of blocks
@@ -310,40 +341,19 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
         full_transactions: bool,
     ) -> ProgramResult<Option<BlockType>> {
         if let Some(block_number) = self.get_block_number(block_id).await? {
-            Ok(
-                if let Some(block) = self
-                    .ethereum_block_storage
-                    .get_block_by_number(block_number)
+            if block_number == U64::zero() {
+                Ok(Some(BlockType::genesis(
+                    self.genesis_timestamp,
+                    full_transactions,
+                )))
+            } else {
+                self.ethereum_block_storage
+                    .get_block_by_number(block_number, full_transactions)
                     .await
-                {
-                    Some(
-                        block
-                            .get_block(full_transactions, self.indexer.get_transaction_storage())
-                            .await?,
-                    )
-                } else {
-                    None
-                },
-            )
+            }
         } else {
-            Err(RomeEvmError::Custom("Indexer is not started".to_string()))
+            Ok(None)
         }
-    }
-
-    /// Finds transaction with a given transaction hash and executes <b>processor</b> function
-    /// against this transaction
-    ///
-    /// * `tx_hash` - hash of requested transaction
-    /// * `processor` - processor closure. Returns optional generic value -
-    ///                 result of transaction processing
-    ///
-    /// Returns result of processing determined by <b>processor</b> function
-    pub async fn process_transaction<Ret>(
-        &self,
-        tx_hash: H256,
-        processor: impl FnOnce(&T::TransactionType) -> Option<Ret>,
-    ) -> ProgramResult<Option<Ret>> {
-        self.indexer.map_tx(tx_hash, processor).await
     }
 
     /// Runs emulation of a given transaction request on a latest block with commitment level
@@ -389,11 +399,6 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
     /// Get program id
     pub fn program_id(&self) -> &Pubkey {
         self.tx_builder.program_id()
-    }
-
-    /// Get indexer
-    pub fn indexer(&self) -> Arc<Indexer<S, T>> {
-        self.indexer.clone()
     }
 
     /// Get reference to TxBuilder
@@ -498,11 +503,21 @@ impl<S: SolanaBlockStorage + 'static, T: TransactionStorage + 'static> RomeEVMCl
     }
 
     pub fn get_rollups(&self) -> ProgramResult<Vec<OwnerInfo>> {
-        let rollups = emulator::get_rollups(
-            self.program_id(),
-            self.sync_rpc_client(),
-        )?;
+        let rollups = emulator::get_rollups(self.program_id(), self.sync_rpc_client())?;
 
         Ok(rollups)
+    }
+
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: &TxHash,
+    ) -> ProgramResult<Option<TransactionReceipt>> {
+        self.ethereum_block_storage
+            .get_transaction_receipt(tx_hash)
+            .await
+    }
+
+    pub async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<EthTransaction>> {
+        self.ethereum_block_storage.get_transaction(tx_hash).await
     }
 }

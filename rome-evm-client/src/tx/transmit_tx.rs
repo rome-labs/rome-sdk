@@ -1,15 +1,16 @@
 use super::utils::TRANSMIT_TX_SIZE;
 use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use solana_program::{entrypoint::MAX_PERMITTED_DATA_INCREASE,};
+use solana_program::entrypoint::MAX_PERMITTED_DATA_INCREASE;
 
 use super::builder::TxBuilder;
 use crate::{
-    error::{ProgramResult, RomeEvmError}, Resource,
+    error::{ProgramResult, RomeEvmError},
+    Resource,
 };
 use async_trait::async_trait;
 use ethers::types::{Bytes, TxHash};
-use solana_sdk::signature::Keypair;
 use rome_utils::iter::into_chunks;
+use solana_sdk::signature::Keypair;
 use std::sync::Arc;
 
 pub struct TransmitTx {

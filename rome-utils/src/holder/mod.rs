@@ -170,7 +170,7 @@ mod tests {
             })
         });
 
-        let holders = futures::future::join_all(handles).await;
+        let holders = futures_util::future::join_all(handles).await;
 
         let result = timeout(Duration::from_millis(100), Holder::new(bitset.clone())).await;
         assert!(result.is_err(), "Expected timeout when all bits are set");

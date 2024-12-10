@@ -1,83 +1,85 @@
 use crate::error::ProgramResult;
-use {
-    crate::indexer::{transaction_storage::TransactionStorage, tx_parser::GasReport},
-    ethers::{
-        abi::ethereum_types::BigEndianHash,
-        types::{
-            Address, Block, Bloom, Bytes, OtherFields, Transaction, TxHash, H256, H64, U256, U64,
-        },
-    },
-    jsonrpsee_core::Serialize,
-    std::{collections::BTreeMap, sync::Arc},
-    tokio::sync::RwLock,
+use crate::indexer::parsers::block_parser::TxResult;
+use crate::indexer::BlockParseResult;
+use async_trait::async_trait;
+use ethers::addressbook::Address;
+use ethers::prelude::{
+    Block, Bloom, Bytes, OtherFields, Transaction, TransactionReceipt, H256, H256 as TxHash, H64,
+    U256,
 };
+use ethers::types::U64;
+use jsonrpsee_core::Serialize;
+use solana_program::clock::UnixTimestamp;
+use solana_sdk::clock::Slot;
+use std::collections::BTreeMap;
+
+// Ethereum block id.
+// Consists of Solana slot number and index of the Eth block within this slot
+pub type EthBlockId = (Slot, usize);
+
+#[derive(Clone)]
+pub struct PendingBlock {
+    pub transactions: Vec<(Transaction, TxResult)>,
+    pub gas_recipient: Option<Address>,
+    pub slot_timestamp: Option<UnixTimestamp>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockParams {
+    pub hash: H256,
+    pub parent_hash: Option<H256>,
+    pub number: U64,
+    pub timestamp: U256,
+}
+
+pub type PendingBlocks = BTreeMap<EthBlockId, PendingBlock>;
+pub type ProducedBlocks = BTreeMap<EthBlockId, BlockParams>;
+
+#[async_trait]
+pub trait BlockProducer: Send + Sync {
+    // Builds chain from pending_blocks on top of block with given parent_hash in a given order
+    async fn produce_blocks(
+        &self,
+        parent_hash: Option<H256>,
+        pending_blocks: &PendingBlocks,
+    ) -> ProgramResult<ProducedBlocks>;
+}
 
 const SHA3_UNCLES: [u8; 32] = [
     0x1d, 0xcc, 0x4d, 0xe8, 0xde, 0xc7, 0x5d, 0x7a, 0xab, 0x85, 0xb5, 0x67, 0xb6, 0xcc, 0xd4, 0x1a,
     0xd3, 0x12, 0x45, 0x1b, 0x94, 0x8a, 0x74, 0x13, 0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4, 0x93, 0x47,
 ];
 
-const EMPTY_ROOT: [u8; 32] = [
-    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
-    0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
-];
-
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Debug)]
 #[serde(untagged)]
 pub enum BlockType {
     BlockWithTransactions(Block<Transaction>),
     BlockWithHashes(Block<TxHash>),
 }
 
-pub struct BlockData {
-    hash: H256,
-    parent_hash: H256,
-    pub number: U64,
-    pub timestamp: U256,
-    gas_used: U256,
-    transactions: Arc<Vec<TxHash>>,
-}
-
-impl BlockData {
-    pub fn new(
-        hash: H256,
+impl BlockType {
+    pub fn base<B>(
+        hash: Option<H256>,
         parent_hash: H256,
-        number: U64,
-        timestamp: U256,
+        tx_root: H256,
+        number: Option<U64>,
         gas_used: U256,
-        transactions: Arc<Vec<TxHash>>,
-    ) -> Self {
-        Self {
+        timestamp: U256,
+    ) -> Block<B> {
+        Block::<B> {
             hash,
             parent_hash,
             number,
-            timestamp,
-            gas_used,
-            transactions: transactions,
-        }
-    }
-
-    fn get_block_base<T>(&self) -> Block<T> {
-        let tx_root = if self.transactions.is_empty() {
-            H256::from(EMPTY_ROOT)
-        } else {
-            H256::from_uint(&U256::one())
-        };
-
-        Block::<T> {
-            hash: Some(self.hash),
-            parent_hash: self.parent_hash,
-            number: Some(self.number),
             gas_limit: U256::from(48000000000000u64),
             uncles_hash: H256::from(SHA3_UNCLES),
             author: Some(Address::default()),
             state_root: H256::zero(),
             transactions_root: tx_root,
             receipts_root: tx_root,
-            gas_used: self.gas_used,
+            gas_used,
             extra_data: Bytes::default(),
             logs_bloom: Some(Bloom::default()),
-            timestamp: self.timestamp,
+            timestamp,
             difficulty: U256::zero(),
             total_difficulty: Some(U256::zero()),
             seal_fields: vec![],
@@ -96,70 +98,64 @@ impl BlockData {
         }
     }
 
-    pub async fn get_block<T: TransactionStorage>(
-        &self,
-        full_transactions: bool,
-        transaction_storage: &T,
-    ) -> ProgramResult<BlockType> {
+    pub fn genesis(timestamp: U256, full_transactions: bool) -> Self {
         if full_transactions {
-            Ok(BlockType::BlockWithTransactions(Block::<Transaction> {
-                transactions: transaction_storage
-                    .get_full_txs(self.transactions.clone())
-                    .await?,
-                ..self.get_block_base()
-            }))
+            BlockType::BlockWithTransactions(Self::base::<Transaction>(
+                Some(H256::zero()),
+                H256::zero(),
+                H256::zero(),
+                Some(U64::zero()),
+                U256::zero(),
+                timestamp,
+            ))
         } else {
-            Ok(BlockType::BlockWithHashes(Block::<TxHash> {
-                transactions: transaction_storage
-                    .get_txs(self.transactions.clone())
-                    .await?,
-                ..self.get_block_base()
-            }))
+            BlockType::BlockWithHashes(Self::base::<TxHash>(
+                Some(H256::zero()),
+                H256::zero(),
+                H256::zero(),
+                Some(U64::zero()),
+                U256::zero(),
+                timestamp,
+            ))
         }
     }
+}
 
-    pub async fn get_transactions<T: TransactionStorage>(
+#[async_trait]
+pub trait EthereumBlockStorage: Send + Sync {
+    async fn register_parse_results(
         &self,
-        transaction_storage: &T,
-    ) -> ProgramResult<Vec<(Transaction, GasReport)>> {
-        transaction_storage
-            .get_full_txs_with_gas_report(self.transactions.clone())
-            .await
-    }
-}
+        parse_results: BTreeMap<Slot, BlockParseResult>,
+    ) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>>;
 
-#[derive(Clone, Default)]
-pub struct EthereumBlockStorage {
-    blocks_by_number: Arc<RwLock<BTreeMap<U64, Arc<BlockData>>>>,
-    blocks_by_hash: Arc<RwLock<BTreeMap<H256, Arc<BlockData>>>>,
-}
+    async fn latest_block(&self) -> ProgramResult<Option<U64>>;
 
-impl EthereumBlockStorage {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    async fn get_block_number(&self, hash: &H256) -> ProgramResult<Option<U64>>;
 
-    pub async fn get_block_by_number(&self, block_number: U64) -> Option<Arc<BlockData>> {
-        let lock = self.blocks_by_number.read().await;
-        lock.get(&block_number).cloned()
-    }
+    async fn get_block_by_number(
+        &self,
+        number: U64,
+        full_transactions: bool,
+    ) -> ProgramResult<Option<BlockType>>;
 
-    pub async fn get_block_by_hash(&self, block_hash: H256) -> Option<Arc<BlockData>> {
-        let lock = self.blocks_by_hash.read().await;
-        lock.get(&block_hash).cloned()
-    }
+    async fn blocks_produced(
+        &self,
+        pending_blocks: PendingBlocks,
+        produced_blocks: ProducedBlocks,
+    ) -> ProgramResult<()>;
 
-    pub async fn set_block(&self, block_data: Arc<BlockData>) {
-        let mut lock1 = self.blocks_by_number.write().await;
-        let mut lock2 = self.blocks_by_hash.write().await;
+    fn chain(&self) -> u64;
 
-        lock1.insert(block_data.number, block_data.clone());
-        lock2.insert(block_data.hash, block_data.clone());
-    }
+    // Returns slot number of the latest slot which contains produced block(s)
+    // or None if no blocks yet being produced
+    async fn get_max_slot_produced(&self) -> ProgramResult<Option<Slot>>;
 
-    pub async fn latest_block(&self) -> Option<U64> {
-        let lock = self.blocks_by_number.read().await;
+    async fn retain_from_slot(&self, from_slot: Slot) -> ProgramResult<()>;
 
-        lock.last_key_value().map(|(block_number, _)| *block_number)
-    }
+    async fn get_transaction_receipt(
+        &self,
+        tx_hash: &TxHash,
+    ) -> ProgramResult<Option<TransactionReceipt>>;
+
+    async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<Transaction>>;
 }

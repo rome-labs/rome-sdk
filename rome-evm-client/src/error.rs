@@ -1,5 +1,7 @@
+use ethers::types::SignatureError;
+use rlp::DecoderError;
 use {
-    ethers::types::transaction::{eip2718::TypedTransactionError, request::RequestError},
+    ethers::types::transaction::request::RequestError,
     rome_evm::{error::RomeProgramError, ExitReason},
     solana_client::client_error::ClientError,
     std::sync::PoisonError,
@@ -15,9 +17,6 @@ pub enum RomeEvmError {
 
     #[error("RomeEvmError: {0}")]
     RomeProgramError(RomeProgramError),
-
-    #[error("TypedTransactionError error: {0}")]
-    TypedTransactionError(#[from] TypedTransactionError),
 
     #[error("RequestError error: {0}")]
     RequestError(#[from] RequestError),
@@ -60,6 +59,21 @@ pub enum RomeEvmError {
 
     #[error("Tokio Join error: {0}")]
     JoinError(tokio::task::JoinError),
+
+    #[error("Diesel error: {0}")]
+    DieselError(diesel::result::Error),
+
+    #[error("Connection pool error: {0}")]
+    ConnectionPoolError(r2d2::Error),
+
+    #[error("RLP Decoder error: {0}")]
+    TxDecodeError(DecoderError),
+
+    #[error("SignatureError: {0}")]
+    SignatureError(SignatureError),
+
+    #[error("serde_json Error: {0}")]
+    SerdeJsonError(serde_json::Error),
 }
 
 impl From<ClientError> for RomeEvmError {
@@ -89,5 +103,35 @@ impl<T> From<PoisonError<T>> for RomeEvmError {
 impl From<tokio::task::JoinError> for RomeEvmError {
     fn from(e: tokio::task::JoinError) -> RomeEvmError {
         RomeEvmError::JoinError(e)
+    }
+}
+
+impl From<diesel::result::Error> for RomeEvmError {
+    fn from(e: diesel::result::Error) -> RomeEvmError {
+        RomeEvmError::DieselError(e)
+    }
+}
+
+impl From<r2d2::Error> for RomeEvmError {
+    fn from(e: r2d2::Error) -> RomeEvmError {
+        RomeEvmError::ConnectionPoolError(e)
+    }
+}
+
+impl From<DecoderError> for RomeEvmError {
+    fn from(e: DecoderError) -> RomeEvmError {
+        RomeEvmError::TxDecodeError(e)
+    }
+}
+
+impl From<SignatureError> for RomeEvmError {
+    fn from(e: SignatureError) -> RomeEvmError {
+        RomeEvmError::SignatureError(e)
+    }
+}
+
+impl From<serde_json::Error> for RomeEvmError {
+    fn from(e: serde_json::Error) -> RomeEvmError {
+        RomeEvmError::SerdeJsonError(e)
     }
 }

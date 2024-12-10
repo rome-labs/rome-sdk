@@ -7,9 +7,10 @@ use ethers::{
 use rome_evm::{
     EVENT_LOG, EXIT_REASON, GAS_RECIPIENT, GAS_VALUE, H160, REVERT_ERROR, REVERT_PANIC,
 };
+use serde::{Deserialize, Serialize};
 use std::mem::size_of;
 
-pub trait Parser {
+trait Parser {
     fn consume(&mut self, log: &str) -> ProgramResult<()> {
         if log.starts_with("Program data: ") {
             let (_, log) = log.split_at("Program data: ".len());
@@ -51,7 +52,7 @@ pub enum GasReportState {
     GasRecipientFound,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct ExitReason {
     pub code: u8,
     pub reason: String,
@@ -306,7 +307,7 @@ impl Parser for GasValueParser {
             }
             GasReportState::GasValue => {
                 if item.len() != 32 {
-                    return Err(LogParserError(format!("Gas value: U256 expected")));
+                    return Err(LogParserError("Gas value: U256 expected".to_string()));
                 };
                 self.gas_value = U256::from_big_endian(item.as_slice());
                 self.state = GasReportState::GasValueFound;
@@ -346,7 +347,7 @@ impl Parser for GasRecipientParser {
             }
             GasReportState::GasRecipient => {
                 if item.len() != 20 {
-                    return Err(LogParserError(format!("Gas recipient: H160 expected")));
+                    return Err(LogParserError("Gas recipient: H160 expected".to_string()));
                 };
                 self.recipient = Some(Address::from_slice(item.as_slice()));
                 self.state = GasReportState::GasRecipientFound;

@@ -36,3 +36,7 @@ rome-utils = { workspace = true }
 rome-solana = { workspace = true }
 emulator = { workspace = true } 
 ethers = { workspace = true }
+
+diesel = {workspace = true}
+diesel-derive-enum = {workspace = true}
+r2d2 = {workspace = true}

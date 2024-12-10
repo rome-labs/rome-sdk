@@ -1,9 +1,10 @@
-use crate::tx::{RemusTx, RheaTx};
+use crate::tx::{RemusTx, RheaTx, RomulusTx};
 use crate::{RomeConfig, RomeTx};
 use ethers::types::transaction::eip2718::TypedTransaction;
 use ethers::types::{Address, TransactionRequest, U256};
 use rome_evm_client::error::{ProgramResult, RomeEvmError};
 use rome_evm_client::rome_evm::H160 as EvmH160;
+use rome_evm_client::tx::CrossChainTx;
 use rome_evm_client::tx::CrossRollupTx;
 use rome_evm_client::tx::TxBuilder;
 use rome_evm_client::util::RomeEvmUtil;
@@ -16,7 +17,7 @@ use rome_solana::tower::SolanaTower;
 use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
 use solana_sdk::compute_budget::ComputeBudgetInstruction;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature;
+use solana_sdk::signature::{Keypair, Signature};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -241,6 +242,80 @@ impl Rome {
         Ok(Box::new(CrossRollupTx::new(
             AtomicIxBatch::new_owned(instructions),
             resource.payer(),
+        )))
+    }
+
+    /// Compose a cross chain transaction
+    pub async fn compose_cross_chain_tx<'a>(
+        &self,
+        romulus_tx: RomulusTx<'a>,
+        signers: Vec<Arc<Keypair>>,
+    ) -> ProgramResult<RomeTx> {
+        println!("\nCompose cross chain tx\n");
+
+        let mut instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+            ComputeBudgetInstruction::request_heap_frame(256 * 1024),
+        ];
+        let mut resource: Option<Resource> = None;
+        let mut vm_steps_executed = 0;
+        let mut emulation_allocated = 0;
+        let mut emulation_syscalls = 0;
+
+        for tx in romulus_tx.eth_txs().iter() {
+            println!("Eth Transaction {:?}", tx);
+
+            let builder = self.get_transaction_builder_for_tx(tx.tx())?;
+            let current_resource = builder.lock_resource().await?;
+            if resource.is_none() {
+                resource = Some(current_resource);
+            }
+
+            let rlp = tx.signed_rlp_bytes();
+
+            let mut data = vec![emulator::Instruction::DoTx as u8];
+            data.append(&mut resource.as_ref().unwrap().fee_recipient());
+            data.extend_from_slice(rlp.as_ref());
+            let emulation = builder.emulate(&data, &resource.as_ref().unwrap().payer_key())?;
+            let vm = emulation.vm.as_ref().expect("Vm expected");
+
+            vm_steps_executed += vm.steps_executed;
+            emulation_allocated += emulation.allocated;
+            emulation_syscalls += emulation.syscalls;
+
+            let ix = builder.build_ix(&emulation, data);
+            println!("Instruction {:?}", ix);
+            instructions.push(ix);
+        }
+        for ix in romulus_tx.sol_ixs().iter() {
+            println!("Sol Instruction {:?}", ix);
+
+            instructions.push(ix.clone());
+        }
+
+        println!(
+            "VM steps executed: {}, allocated: {}, syscalls: {}",
+            vm_steps_executed, emulation_allocated, emulation_syscalls
+        );
+
+        let is_atomic_tx = vm_steps_executed <= 500 // NUMBER_OPCODES_PER_TX
+                && emulation_allocated <= 1_024 * 10 // MAX_PERMITTED_DATA_INCREASE
+                && emulation_syscalls < 64;
+
+        if !is_atomic_tx {
+            return Err(RomeEvmError::Custom(
+                "Transaction is too large or expensive".to_string(),
+            ));
+        }
+
+        let resource = resource.ok_or_else(|| {
+            RomeEvmError::Custom("Failed to acquire resource for Solana transaction".to_string())
+        })?;
+
+        Ok(Box::new(CrossChainTx::new(
+            AtomicIxBatch::new_owned(instructions),
+            resource.payer(),
+            signers,
         )))
     }
 

@@ -5,6 +5,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_rpc_client_api::client_error::Result as ClientResult;
 use solana_sdk::signature::{Keypair, Signature};
 use solana_sdk::transaction::Transaction;
+use std::sync::Arc;
 
 /// A tower that manages functionalities of the Solana network
 #[derive(Clone)]
@@ -52,6 +53,24 @@ impl SolanaTower {
         payer: &Keypair,
     ) -> ClientResult<Signature> {
         let tx = self.to_tx(ixs, payer).await?;
+        tracing::info!("Sending tx: {:?}", tx.signatures[0]);
+
+        self.client.send_and_confirm_transaction(&tx).await
+    }
+
+    /// Send and confirm a transaction composed of [AtomicIxBatch] with signers
+    pub async fn send_and_confirm_with_signers<'a>(
+        &self,
+        ixs: &'a AtomicIxBatch<'a>,
+        payer: &Keypair,
+        signers: Vec<Arc<Keypair>>,
+    ) -> ClientResult<Signature> {
+        println!("send_and_confirm_with_signers");
+        let blockhash = self.client.get_latest_blockhash().await?;
+        let signers_slice: Vec<&Keypair> = signers.iter().map(|arc| arc.as_ref()).collect();
+
+        let tx = ixs.compose_solana_tx_with_signers(payer, &signers_slice, blockhash);
+        println!("Sending tx: {:?}", tx);
         tracing::info!("Sending tx: {:?}", tx.signatures[0]);
 
         self.client.send_and_confirm_transaction(&tx).await
@@ -139,6 +158,20 @@ impl SolanaTower {
                         tracing::warn!("Failed to send and confirm single tx: {}", e);
                         e
                     })?;
+
+                    tracing::info!("Single tx sig: {:?}", sig);
+
+                    sigs.push(sig);
+                }
+                IxExecStepBatch::SingleWithSigners(tx, signers) => {
+                    println!("SingleWithSigners");
+                    let sig = self
+                        .send_and_confirm_with_signers(&tx, &payer, signers)
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!("Failed to send and confirm single tx: {}", e);
+                            e
+                        })?;
 
                     tracing::info!("Single tx sig: {:?}", sig);
 

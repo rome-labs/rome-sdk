@@ -61,6 +61,9 @@ jsonrpsee-core = "0.24.1"
 ripemd = "0.1"
 # Rome da
 sha3 = "0.10.1"
+diesel = { version = "2.2.4", features = ["postgres", "r2d2", "serde_json"] }
+diesel-derive-enum = {  version = "2.1.0", features = ["postgres"] }
+r2d2 = "0.8.10"
 
 # ethers
 ethers = "2.0.14"

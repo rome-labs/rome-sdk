@@ -1,5 +1,5 @@
 {
-    "rpc_url": "https://apius.devnet.romeprotocol.xyz",
+    "rpc_url": "https://apieu.devnet.romeprotocol.xyz",
     "commitment": "confirmed",
     "rollups": {
         "200002": "RD2Gg7Lcnv62XmRHAzxh6fQQfMRzHtN5LeKPVBhYU5S",
@@ -9,7 +9,7 @@
     },
     "payers": [
         {
-            "payer_keypair": "/Users/username/.config/solana/id.json",
+            "payer_keypair": "/Users/sattvik/.config/solana/id.json",
             "number_holders": 64
         }
     ]

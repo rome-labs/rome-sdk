@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use rome_solana::config::SolanaConfig;
 use rome_evm_client::resources::PayerConfig;
+use rome_solana::config::SolanaConfig;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 /// Rome interface configuration

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use anyhow::bail;
+use std::sync::Arc;
 
 use crate::types::{GethTxPoolResult, GethTxPoolSender};
 use rome_utils::jsonrpc::{JsonRpcRequest, JsonRpcRequestOwned, JsonRpcResponse};

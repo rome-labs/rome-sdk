@@ -1,13 +1,14 @@
 use super::{builder::TxBuilder, utils::MULTIPLE_ITERATIONS};
 use crate::{
-    error::{ProgramResult, RomeEvmError}, Resource,
+    error::{ProgramResult, RomeEvmError},
+    Resource,
 };
 use async_trait::async_trait;
 use emulator::Emulation;
 use ethers::prelude::TxHash;
 use ethers::{types::Bytes, utils::keccak256};
-use solana_sdk::signature::Keypair;
 use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
+use solana_sdk::signature::Keypair;
 use std::sync::Arc;
 
 enum Steps {

@@ -45,3 +45,26 @@ pub struct ForkchoiceUpdateResponse {
     /// Payload ID
     pub payload_id: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPayload {
+    pub parent_hash: String,
+    pub fee_recipient: String,
+    pub state_root: String,
+    pub receipts_root: String,
+    pub logs_bloom: String,
+    pub prev_randao: String,
+    pub block_number: u64,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+    pub rome_gas_used: Option<Vec<u64>>,
+    pub timestamp: u64,
+    pub extra_data: String,
+    pub base_fee_per_gas: Option<u128>,
+    pub block_hash: String,
+    pub transactions: Vec<serde_json::Value>,
+    pub withdrawals: Option<Vec<serde_json::Value>>,
+    pub blob_gas_used: Option<u64>,
+    pub excess_blob_gas: Option<u64>,
+}

@@ -52,6 +52,25 @@ impl AtomicIxBatch<'_> {
 
         Transaction::new(&[payer], message, blockhash)
     }
+
+    /// Compose a [Transaction] from [IxBatch] and signers
+    pub fn compose_solana_tx_with_signers(
+        &self,
+        payer: &Keypair,
+        signers: &[&Keypair],
+        blockhash: Hash,
+    ) -> Transaction {
+        println!("compose_solana_tx_with_signers");
+        let message = Message::new(&self.0, Some(&payer.pubkey()));
+
+        let mut all_signers = vec![payer]; // Start with payer
+        all_signers.extend_from_slice(signers); // Add other signers
+
+        all_signers.iter().for_each(|signer| {
+            println!("signer pubkey: {:?}", signer.pubkey());
+        });
+        Transaction::new(&all_signers, message, blockhash)
+    }
 }
 
 impl std::ops::Deref for AtomicIxBatch<'_> {

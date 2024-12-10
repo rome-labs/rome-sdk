@@ -6,6 +6,7 @@ mod tx_tuple;
 pub use remus::*;
 pub use rhea::*;
 use rome_evm_client::error::RomeEvmError;
+pub use romulus::*;
 pub use tx_tuple::*;
 
 /// Rome Tx

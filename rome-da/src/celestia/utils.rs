@@ -79,7 +79,7 @@ pub fn decompress_data(compressed_data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
 
 pub fn compress_blocks_to_blobs(
     namespace: &str,
-    blocks: &Vec<DaSubmissionBlock>,
+    blocks: &[DaSubmissionBlock],
 ) -> anyhow::Result<Vec<BlobParam>> {
     let mut blobs: Vec<BlobParam> = vec![];
 

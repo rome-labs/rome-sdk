@@ -2,7 +2,8 @@ use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
 
 use super::{builder::TxBuilder, utils::MULTIPLE_ITERATIONS, TransmitTx};
 use crate::{
-    error::{ProgramResult, RomeEvmError}, Resource,
+    error::{ProgramResult, RomeEvmError},
+    Resource,
 };
 use async_trait::async_trait;
 use emulator::Emulation;
@@ -59,10 +60,10 @@ impl IterativeTxHolder {
 
     fn ixs(&self) -> ProgramResult<Vec<OwnedAtomicIxBatch>> {
         let data = self.emulation_data();
-        let emulation = self.transmit_tx.tx_builder.emulate(
-            &data,
-            &self.transmit_tx.resource.payer_key()
-        )?;
+        let emulation = self
+            .transmit_tx
+            .tx_builder
+            .emulate(&data, &self.transmit_tx.resource.payer_key())?;
 
         let vm = emulation.vm.as_ref().expect("vm expected");
         let count = (vm.iteration_count as f64 * MULTIPLE_ITERATIONS) as u64;

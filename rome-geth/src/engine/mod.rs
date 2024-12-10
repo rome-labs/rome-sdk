@@ -1,16 +1,17 @@
 use self::claim::EngineClaim;
 use self::config::GethEngineConfig;
 use crate::engine::types::param::{
-    ForkchoiceUpdateParams, ForkchoiceUpdateResponse, PayloadStatus,
+    ExecutionPayload, ForkchoiceUpdateParams, ForkchoiceUpdateResponse, PayloadStatus,
 };
-use anyhow::anyhow;
-use ethers::core::types::Transaction;
+use ethers::core::types::{H256, U64};
 use ethers::prelude::ProviderError::CustomError;
+use ethers::types::U256;
 use reqwest::header::HeaderMap;
-use rome_evm_client::indexer::tx_parser::GasReport;
+use rome_evm_client::indexer::TxResult;
+use rome_evm_client::indexer::{BlockParams, PendingBlock};
 use rome_utils::auth::AuthState;
 use rome_utils::jsonrpc::{JsonRpcClient, JsonRpcRequest};
-use serde_json::{from_value, json};
+use serde_json::{from_value, json, to_value};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -20,6 +21,7 @@ use std::sync::{Arc, RwLock};
 pub mod claim;
 /// Geth engine configuration.
 pub mod config;
+pub mod engine_api_block_producer;
 /// Types related to geth engine.
 pub mod types;
 
@@ -33,12 +35,12 @@ pub struct GethEngine {
 
 impl GethEngine {
     /// Create a new GethEngine instance
-    pub fn new(config: GethEngineConfig) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub fn new(config: GethEngineConfig) -> Self {
+        Self {
             _client: JsonRpcClient::new(config.geth_engine_addr),
             geth_engine_secret: config.geth_engine_secret,
             headers: Arc::new(RwLock::new(HeaderMap::default())),
-        })
+        }
     }
 
     fn get_headers(&self) -> anyhow::Result<HeaderMap> {
@@ -68,7 +70,7 @@ impl GethEngine {
         Ok(lock.deref().clone())
     }
 
-    async fn send_request(
+    pub async fn send_request(
         &self,
         method: &str,
         params: Vec<serde_json::Value>,
@@ -109,75 +111,63 @@ impl GethEngine {
 
     pub async fn advance_rollup_state(
         &self,
-        transactions: &Vec<(Transaction, GasReport)>,
-        timestamp: u64,
-    ) -> anyhow::Result<()> {
-        // Fetch the latest block hash from geth client
-        let get_block_req_params: Vec<serde_json::Value> = vec!["latest".into(), true.into()];
-        let get_block_res = self
-            .send_request("eth_getBlockByNumber", get_block_req_params)
-            .await;
-        let blockhash = get_block_res?
-            .get("hash")
-            .expect("Failed to get block hash")
-            .clone();
-
+        parent_hash: H256,
+        timestamp: U256,
+        pending_block: &PendingBlock,
+    ) -> anyhow::Result<BlockParams> {
         //
         // ------------------- Do fork choice update 1 -------------------
         //
 
-        // Prev randao and suggested fee recipient are set to random values
-        let hex_timestamp = format!("0x{:x}", timestamp);
-
-        let gas_prices: Vec<u64> = transactions
+        let gas_prices: Vec<u64> = pending_block
+            .transactions
             .iter()
             .filter_map(|(tx, _)| tx.gas_price)
             .map(|price| price.as_u64())
             .collect();
 
-        let gas_reports: Vec<&GasReport> = transactions
+        let tx_results: Vec<&TxResult> = pending_block
+            .transactions
             .iter()
-            .map(|(_, gas_report)| gas_report)
+            .map(|(_, tx_result)| tx_result)
             .collect();
 
-        let first_report = gas_reports
-            .first()
-            .ok_or(anyhow!("Gas reports are empty"))?;
-        let fee_recipient = first_report.gas_recipient.unwrap_or_default();
-        for report in &gas_reports {
-            if report.gas_recipient.unwrap_or_default() != fee_recipient {
-                return Err(anyhow!("Transactions must have the same fee recipient"));
-            }
-        }
-
-        let gas_used: Vec<u64> = gas_reports
+        let gas_used: Vec<u64> = tx_results
             .iter()
-            .map(|gas_report| gas_report.gas_value.as_u64())
+            .map(|tx_result| tx_result.gas_report.gas_value.as_u64())
             .collect();
 
         let forkchoice_params = ForkchoiceUpdateParams {
-            transactions: transactions
+            transactions: pending_block
+                .transactions
                 .iter()
                 .map(|(tx, _)| serde_json::Value::from(tx.rlp().to_string()))
                 .collect(),
-            timestamp: hex_timestamp,
+            timestamp: format!("0x{:x}", timestamp),
             prev_randao: "0xc130d5e63c61c935f6089e61140ca9136172677cf6aa5800dcc1cf0a02152a14"
                 .to_string(),
-            suggested_fee_recipient: format!("{:?}", fee_recipient),
+            suggested_fee_recipient: format!(
+                "{:?}",
+                pending_block.gas_recipient.unwrap_or_default()
+            ),
             withdrawals: vec![],
             no_tx_pool: true,
             gas_prices,
             gas_used: gas_used.clone(),
         };
+
+        let blockhash = serde_json::Value::from(format!("0x{:x}", parent_hash));
         let forkchoice_request = vec![
             json!({
                 "headBlockHash": blockhash,
                 "safeBlockHash": blockhash,
                 "finalizedBlockHash": blockhash,
             }),
-            serde_json::to_value(forkchoice_params).unwrap(),
+            to_value(forkchoice_params).unwrap(),
         ];
-        let fcu1_res = self.forkchoice_update(forkchoice_request).await;
+        let fcu1_res = self
+            .send_request("engine_forkchoiceUpdatedV2", forkchoice_request)
+            .await?;
 
         //
         // ------------------------- Get Payload -------------------------
@@ -188,7 +178,9 @@ impl GethEngine {
         // tracing::info!("Payload ID: {:#?}", payload_id);
 
         let get_payload_request = vec![json!(payload_id)];
-        let payload_res = self.get_payload(get_payload_request).await;
+        let payload_res = self
+            .send_request("engine_getPayloadV2", get_payload_request)
+            .await?;
 
         //
         // ------------------------- Send Payload -------------------------
@@ -197,12 +189,14 @@ impl GethEngine {
         let execution_payload = payload_res
             .get("executionPayload")
             .expect("Failed to get execution payload");
-        let mut execution_payload = execution_payload.clone();
-        execution_payload["romeGasUsed"] = json!(gas_used);
 
-        let new_payload = vec![execution_payload.clone()];
-        let send_payload_res = self.send_new_payload(new_payload).await;
-
+        let mut execution_payload: ExecutionPayload = from_value(execution_payload.clone())?;
+        let block_hash = H256::from_str(execution_payload.block_hash.as_str())?;
+        let block_number = U64::from(execution_payload.block_number);
+        execution_payload.rome_gas_used = Some(gas_used);
+        let send_payload_res = self
+            .send_request("engine_newPayloadV2", vec![to_value(execution_payload)?])
+            .await?;
         let parsed_send_payload_res: PayloadStatus = from_value(send_payload_res)?;
         let new_blockhash = parsed_send_payload_res.latest_valid_hash;
 
@@ -218,44 +212,16 @@ impl GethEngine {
             }),
             json!(null),
         ];
-        let fcu2_res = self.forkchoice_update(forkchoice_request).await;
-        println!("Forkchoice response: {:?}", fcu2_res);
 
-        Ok(())
-    }
+        let _ = self
+            .send_request("engine_forkchoiceUpdatedV2", forkchoice_request)
+            .await?;
 
-    /// Send a forkchoice update to the engine
-    pub async fn forkchoice_update(&self, params: Vec<serde_json::Value>) -> serde_json::Value {
-        let res = self
-            .send_request("engine_forkchoiceUpdatedV2", params)
-            .await;
-        match res {
-            Ok(response) => response,
-            Err(e) => {
-                panic!("Failed to do forkchoice_update: {:?}", e);
-            }
-        }
-    }
-
-    /// Get payload from the engine
-    pub async fn get_payload(&self, params: Vec<serde_json::Value>) -> serde_json::Value {
-        let res = self.send_request("engine_getPayloadV2", params).await;
-        match res {
-            Ok(response) => response,
-            Err(e) => {
-                panic!("Failed to get payload: {:?}", e);
-            }
-        }
-    }
-
-    /// Send new payload to the engine
-    pub async fn send_new_payload(&self, params: Vec<serde_json::Value>) -> serde_json::Value {
-        let res = self.send_request("engine_newPayloadV2", params).await;
-        match res {
-            Ok(response) => response,
-            Err(e) => {
-                panic!("Failed to send new payload: {:?}", e);
-            }
-        }
+        Ok(BlockParams {
+            hash: block_hash,
+            parent_hash: Some(parent_hash),
+            number: block_number,
+            timestamp,
+        })
     }
 }
