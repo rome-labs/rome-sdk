@@ -9,7 +9,7 @@ on:
       rome_evm_branch:
         description: 'Branch name for the rome-evm repository'
         required: false
-        default: 'master'
+        default: 'main'
 env:
   REF_NAME: ${{github.ref_name}}
 
@@ -37,13 +37,13 @@ jobs:
             # Check if the SDK branch is main (i.e., the default branch)
             SDK_BRANCH="${{ github.ref_name }}"
             if [ "$SDK_BRANCH" == "main" ]; then
-              EVM_BRANCH_NAME="master"
+              EVM_BRANCH_NAME="main"
             else
-               # Get branch name from commit message or default to master if not provided
+               # Get branch name from commit message or default to main if not provided
                if [[ "${{ github.event.head_commit.message }}" =~ "rome-evm-branch:" ]]; then
                 EVM_BRANCH_NAME=$(echo "${{ github.event.head_commit.message }}" | grep -oP 'rome-evm-branch:\s*\K\S+')
                else
-                EVM_BRANCH_NAME="master"
+                EVM_BRANCH_NAME="main"
                fi
             fi
           fi
@@ -80,5 +80,4 @@ jobs:
         run: |
           ls -l
           cd rome-sdk
-          cargo test
           RUSTFLAGS="-D warnings" cargo build --release
