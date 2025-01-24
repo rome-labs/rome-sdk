@@ -2,10 +2,10 @@ use crate::indexer::ethereum_block_storage::EthBlockId;
 use crate::indexer::parsers::log_parser;
 use crate::indexer::parsers::log_parser::LogParser;
 use crate::indexer::parsers::tx_parser::{decode_transaction_from_rlp, TxParser};
-use crate::indexer::BlockParams;
+use crate::indexer::{BlockParams, BlockType};
 use ethers::addressbook::Address;
-use ethers::prelude::Log;
-use ethers::types::Transaction;
+use ethers::prelude::{Block, Log, H256};
+use ethers::types::{BigEndianHash, Transaction};
 use jsonrpsee_core::Serialize;
 use serde::Deserialize;
 use {
@@ -92,7 +92,7 @@ pub struct TxResult {
     pub gas_report: GasReport,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EthBlock {
     pub id: EthBlockId,
 
@@ -104,6 +104,37 @@ pub struct EthBlock {
 
     // Values obtained from producing stage
     pub block_params: Option<BlockParams>,
+}
+
+const EMPTY_ROOT: [u8; 32] = [
+    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
+    0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
+];
+
+impl EthBlock {
+    pub fn get_block_base<B>(&self) -> Block<B> {
+        let tx_root = if self.transactions.is_empty() {
+            H256::from(EMPTY_ROOT)
+        } else {
+            H256::from_uint(&U256::one())
+        };
+
+        let block_params = self.block_params.as_ref();
+        BlockType::base::<B>(
+            block_params.map(|p| p.hash),
+            block_params
+                .as_ref()
+                .and_then(|p| p.parent_hash)
+                .unwrap_or_default(),
+            tx_root,
+            block_params.as_ref().map(|p| p.number),
+            self.block_gas_used,
+            block_params
+                .as_ref()
+                .map(|p| p.timestamp)
+                .unwrap_or_default(),
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -415,6 +446,32 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
         });
     }
 
+    pub async fn get_block_with_retries(
+        &self,
+        slot_number: Slot,
+    ) -> ProgramResult<Arc<UiConfirmedBlock>> {
+        let mut num_retries = 10;
+
+        loop {
+            let block = self.solana_block_storage.get_block(slot_number).await;
+
+            if let Ok(Some(block)) = block {
+                return Ok(block);
+            }
+
+            num_retries -= 1;
+
+            if num_retries > 0 {
+                tracing::warn!("Failed to load block for slot {slot_number}, retrying...");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+                break Err(Custom(format!(
+                    "Unable to load block for slot {slot_number}"
+                )));
+            }
+        }
+    }
+
     pub async fn parse(
         &mut self,
         solana_slot_number: Slot,
@@ -431,6 +488,7 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
 
             let mut current_slot = solana_slot_number;
             let mut blocks_parsed: usize = 0;
+
             loop {
                 self.register_block(current_slot, current_block.clone());
                 blocks_parsed += 1;
@@ -441,14 +499,7 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
                 }
 
                 current_slot = current_block.parent_slot;
-                current_block = self
-                    .solana_block_storage
-                    .get_block(current_block.parent_slot)
-                    .await?
-                    .ok_or(Custom(format!(
-                        "Parent slot not found {:?}",
-                        current_block.parent_slot
-                    )))?;
+                current_block = self.get_block_with_retries(current_slot).await?;
             }
 
             Ok(Some(BlockParseResult {

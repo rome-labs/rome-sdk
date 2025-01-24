@@ -1,11 +1,8 @@
 use ethers::types::SignatureError;
 use rlp::DecoderError;
 use {
-    ethers::types::transaction::request::RequestError,
-    rome_evm::{error::RomeProgramError, ExitReason},
-    solana_client::client_error::ClientError,
-    std::sync::PoisonError,
-    thiserror::Error,
+    ethers::types::transaction::request::RequestError, rome_evm::error::RomeProgramError,
+    solana_client::client_error::ClientError, std::sync::PoisonError, thiserror::Error,
 };
 
 pub type ProgramResult<T> = std::result::Result<T, RomeEvmError>;
@@ -33,11 +30,11 @@ pub enum RomeEvmError {
     #[error("Internal error")]
     InternalError,
 
-    #[error("Revert message: {0}, data: {1:?})")]
-    Revert(String, Vec<u8>),
+    #[error("Emulation reverted: {0}, data: {1:?})")]
+    EmulationRevert(String, String),
 
-    #[error("ExitReason: {0:?}")]
-    ExitReason(ExitReason),
+    #[error("Emulation error: {0:?}")]
+    EmulationError(String),
 
     #[error("There are no unlocked holders left")]
     NoFreeHolders,
@@ -74,6 +71,9 @@ pub enum RomeEvmError {
 
     #[error("serde_json Error: {0}")]
     SerdeJsonError(serde_json::Error),
+
+    #[error("Ethers provider error: {0}")]
+    EthersProviderError(ethers::providers::ProviderError),
 }
 
 impl From<ClientError> for RomeEvmError {
@@ -133,5 +133,11 @@ impl From<SignatureError> for RomeEvmError {
 impl From<serde_json::Error> for RomeEvmError {
     fn from(e: serde_json::Error) -> RomeEvmError {
         RomeEvmError::SerdeJsonError(e)
+    }
+}
+
+impl From<ethers::providers::ProviderError> for RomeEvmError {
+    fn from(e: ethers::providers::ProviderError) -> RomeEvmError {
+        RomeEvmError::EthersProviderError(e)
     }
 }

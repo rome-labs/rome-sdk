@@ -222,7 +222,7 @@ pub fn test_serilize_blocks() -> anyhow::Result<()> {
         },
     ];
 
-    let blobs: Vec<BlobParam> = compress_blocks_to_blobs(&"", &blocks)?;
+    let blobs: Vec<BlobParam> = compress_blocks_to_blobs("", &blocks)?;
 
     for blob in blobs {
         let tx = decode_blob_to_tx(&blob).unwrap();

@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
 use crate::error::ProgramResult;
 use crate::indexer::{self, pg_storage::PgPool};
 use async_trait::async_trait;
 use diesel::{self, define_sql_function, sql_types, Connection, RunQueryDsl};
 use solana_program::clock::Slot;
 use solana_transaction_status::UiConfirmedBlock;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub struct SolanaBlockStorage {
@@ -27,7 +27,10 @@ define_sql_function! {
 
 #[async_trait]
 impl indexer::SolanaBlockStorage for SolanaBlockStorage {
-    async fn store_blocks(&self, blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>) -> ProgramResult<()> {
+    async fn store_blocks(
+        &self,
+        blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
+    ) -> ProgramResult<()> {
         self.pool.get()?.transaction(|conn| {
             for (slot_number, block) in blocks {
                 diesel::sql_query("CALL set_block($1, $2, $3);")
@@ -43,11 +46,12 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
 
     async fn get_block(&self, slot_number: Slot) -> ProgramResult<Option<Arc<UiConfirmedBlock>>> {
         Ok(
-            if let Some(value) =
-                diesel::select(get_block(slot_number as i64))
-                    .get_result::<Option<Vec<u8>>>(&mut self.pool.get()?)?
+            if let Some(value) = diesel::select(get_block(slot_number as i64))
+                .get_result::<Option<Vec<u8>>>(&mut self.pool.get()?)?
             {
-                Some(Arc::new(serde_json::from_slice::<UiConfirmedBlock>(&value)?))
+                Some(Arc::new(serde_json::from_slice::<UiConfirmedBlock>(
+                    &value,
+                )?))
             } else {
                 None
             },

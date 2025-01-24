@@ -1,8 +1,8 @@
 use rome_solana::tower::SolanaTower;
 use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
 use std::collections::BTreeMap;
-use std::ops::{Deref, DerefMut};
 
+use crate::error::RomeEvmError::Custom;
 use crate::error::{ProgramResult, RomeEvmError};
 use crate::indexer::{
     BlockParams, BlockProducer, PendingBlocks, ProducedBlocks, SolanaBlockStorage,
@@ -10,7 +10,7 @@ use crate::indexer::{
 };
 use crate::indexer::{BlockType, EthereumBlockStorage};
 use crate::tx::TxBuilder;
-use crate::util::RomeEvmUtil;
+use crate::util::{check_exit_reason, RomeEvmUtil};
 use crate::Payer;
 use async_trait::async_trait;
 use emulator::{Emulation, Instruction};
@@ -28,20 +28,16 @@ use solana_sdk::{
     signer::{keypair::Keypair, Signer},
     transaction::Transaction,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::{
-    sync::{oneshot, RwLock},
-    task::JoinHandle,
-};
+use tokio::{sync::oneshot, task::JoinHandle};
 
 /// Client component interacting with the instance of Rome-EVM smart-contract on Solana blockchain
 /// (Rome-EVM Rollup).
 ///
 /// Interface of RomeEVMClient is designed to be closely compatible with standard Ethereum JSON RPC
 /// and mostly repeats its functionality.
-pub struct RomeEVMClient<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> {
-    solana_block_storage: Arc<S>,
-
+pub struct RomeEVMClient<E: EthereumBlockStorage + 'static> {
     ethereum_block_storage: Arc<E>,
 
     tx_builder: TxBuilder,
@@ -56,39 +52,48 @@ pub struct RomeEVMClient<S: SolanaBlockStorage + 'static, E: EthereumBlockStorag
 const INDEXING_INTERVAL_MS: u64 = 400;
 
 #[derive(Clone)]
-struct ClientBlockRegistrator {
-    last_number: Arc<RwLock<u64>>,
+struct DummyBlockProducer {
+    next_block: Arc<AtomicU64>,
 }
 
-impl ClientBlockRegistrator {
+impl DummyBlockProducer {
     fn new() -> Self {
         Self {
-            last_number: Arc::new(RwLock::new(1)),
+            next_block: Arc::new(AtomicU64::new(1)),
         }
     }
 }
 
 #[async_trait]
-impl BlockProducer for ClientBlockRegistrator {
+impl BlockProducer for DummyBlockProducer {
+    async fn last_produced_block(&self) -> ProgramResult<U64> {
+        Ok(U64::from(self.next_block.load(Ordering::Relaxed) - 1))
+    }
+
+    async fn get_block_params(&self, _block_number: U64) -> ProgramResult<BlockParams> {
+        Err(Custom(
+            "DummyBlockProducer does not support get_block_params".to_string(),
+        ))
+    }
+
     async fn produce_blocks(
         &self,
-        mut parent_hash: Option<TxHash>,
+        mut parent_hash: Option<H256>,
         pending_blocks: &PendingBlocks,
     ) -> ProgramResult<ProducedBlocks> {
-        let mut lock = self.last_number.write().await;
         let mut results = BTreeMap::new();
         for (block_id, pending_block) in pending_blocks {
+            let block_number = self.next_block.fetch_add(1, Ordering::Relaxed);
             let blockhash = H256::random();
             results.insert(
                 *block_id,
                 BlockParams {
                     hash: blockhash,
                     parent_hash,
-                    number: U64::from(*lock.deref()),
+                    number: U64::from(block_number),
                     timestamp: U256::from(pending_block.slot_timestamp.unwrap_or_default()),
                 },
             );
-            *lock.deref_mut() += 1;
             parent_hash = Some(blockhash);
         }
 
@@ -96,7 +101,7 @@ impl BlockProducer for ClientBlockRegistrator {
     }
 }
 
-impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVMClient<S, E> {
+impl<E: EthereumBlockStorage + 'static> RomeEVMClient<E> {
     /// Constructor
     ///
     /// * `chain_id` - Chain ID of a Rollup
@@ -116,7 +121,6 @@ impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVM
         program_id: Pubkey,
         solana: SolanaTower,
         commitment_level: CommitmentLevel,
-        solana_block_storage: Arc<S>,
         ethereum_block_storage: Arc<E>,
         payers: Vec<Payer>,
     ) -> Self {
@@ -127,7 +131,6 @@ impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVM
         ));
 
         Self {
-            solana_block_storage,
             ethereum_block_storage,
             tx_builder: TxBuilder::new(chain_id, program_id, sync_client, payers),
             solana,
@@ -142,25 +145,28 @@ impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVM
     }
 
     /// Start the indexer and consume blocks
-    pub async fn start_indexing(
+    pub fn start_indexing<S: SolanaBlockStorage + 'static>(
         &self,
+        solana_block_storage: Arc<S>,
         start_slot: Option<Slot>,
         idx_started_oneshot: Option<oneshot::Sender<()>>,
         max_slot_history: Option<Slot>,
+        block_loader_batch_size: Slot,
     ) -> JoinHandle<()> {
         StandaloneIndexer {
             solana_client: self.solana.client_cloned(),
             commitment_level: self.commitment_level,
             rome_evm_pubkey: *self.program_id(),
-            solana_block_storage: self.solana_block_storage.clone(),
+            solana_block_storage,
             ethereum_block_storage: self.ethereum_block_storage.clone(),
-            block_producer: ClientBlockRegistrator::new(),
+            block_producer: DummyBlockProducer::new(),
         }
         .start_indexing(
             start_slot,
             idx_started_oneshot,
             INDEXING_INTERVAL_MS,
             max_slot_history,
+            block_loader_batch_size,
         )
     }
 
@@ -226,13 +232,16 @@ impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVM
     ///
     /// Returns result of execution
     pub fn call(&self, call: &TransactionRequest) -> ProgramResult<Bytes> {
-        let value = emulator::eth_call(
+        let emulation = emulator::eth_call(
             self.program_id(),
             RomeEvmUtil::cast_transaction_request(call, self.tx_builder.chain_id),
             self.sync_rpc_client(),
         )?;
-        let bytes = value.into();
-        Ok(bytes)
+
+        check_exit_reason(&emulation)?;
+        let vm = emulation.vm.expect("vm expected");
+        let value = vm.return_value.unwrap_or_default();
+        Ok(value.into())
     }
 
     /// Returns transaction count (nonce) of a requested account in the latest block
@@ -257,7 +266,7 @@ impl<S: SolanaBlockStorage + 'static, E: EthereumBlockStorage + 'static> RomeEVM
             RomeEvmUtil::cast_transaction_request(call, self.tx_builder.chain_id),
             self.sync_rpc_client(),
         )?;
-        TxBuilder::check_emulation(&emulation)?;
+        check_exit_reason(&emulation)?;
 
         Ok(emulation.gas.into())
     }

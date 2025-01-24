@@ -1,3 +1,4 @@
+pub mod config;
 mod ethereum_block_storage;
 pub mod inmemory;
 pub mod parsers;
@@ -10,12 +11,15 @@ mod standalone_indexer;
 pub use crate::error::ProgramResult;
 pub use ethereum_block_storage::{
     BlockParams, BlockProducer, BlockType, EthereumBlockStorage, PendingBlock, PendingBlocks,
-    ProducedBlocks,
+    ProducedBlocks, ReceiptParams,
 };
+use ethers::addressbook::Address;
+use ethers::prelude::{H256, U256};
 pub use parsers::block_parser::{BlockParseResult, BlockParser, TxResult};
 pub use rollup_indexer::RollupIndexer;
 pub use solana_block_loader::SolanaBlockLoader;
 pub use solana_block_storage::SolanaBlockStorage;
+use solana_program::keccak::hash;
 pub use standalone_indexer::StandaloneIndexer;
 
 #[cfg(test)]
@@ -154,4 +158,20 @@ pub mod test {
             }),
         )
     }
+}
+
+pub fn calc_contract_address(
+    from: &Address,
+    to: &Option<Address>,
+    nonce: &U256,
+) -> Option<Address> {
+    if to.is_some() {
+        return None;
+    }
+
+    let mut rlp = rlp::RlpStream::new_list(2);
+    rlp.append(from);
+    rlp.append(nonce);
+    let hash = hash(&rlp.out());
+    Some(Address::from(H256::from(hash.to_bytes())))
 }

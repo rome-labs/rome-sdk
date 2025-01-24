@@ -6,7 +6,10 @@ use {
 
 #[async_trait]
 pub trait SolanaBlockStorage: Send + Sync {
-    async fn store_blocks(&self, blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>) -> ProgramResult<()>;
+    async fn store_blocks(
+        &self,
+        blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
+    ) -> ProgramResult<()>;
 
     async fn get_block(&self, slot_number: Slot) -> ProgramResult<Option<Arc<UiConfirmedBlock>>>;
 

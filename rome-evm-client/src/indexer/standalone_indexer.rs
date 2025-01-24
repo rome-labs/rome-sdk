@@ -36,6 +36,7 @@ impl<
         idx_started_oneshot: Option<oneshot::Sender<()>>,
         indexing_interval_ms: u64,
         max_slot_history: Option<Slot>,
+        block_loader_batch_size: Slot,
     ) -> JoinHandle<()> {
         let solana_block_loader = SolanaBlockLoader::new(
             self.solana_block_storage.clone(),
@@ -54,7 +55,7 @@ impl<
         tokio::spawn(async move {
             let block_loader_jh = tokio::spawn(async move {
                 solana_block_loader
-                    .start(start_slot, indexing_interval_ms, idx_started_oneshot)
+                    .start(start_slot, indexing_interval_ms, idx_started_oneshot, block_loader_batch_size)
                     .await
             });
 

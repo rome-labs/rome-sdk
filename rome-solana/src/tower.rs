@@ -213,11 +213,13 @@ impl SolanaTower {
                             .collect::<Vec<_>>();
 
                         for e in &errs {
-                            tracing::info!("Filed to send iterative tx: {:?}", e);
+                            tracing::info!("Failed to send iterative tx: {:?}", e);
                         }
 
                         let error = if errs.is_empty() {
-                            "not ehough iterations".to_string()
+                            let mes = "tx execution is not completed or tx status unknown";
+                            tracing::info!(mes);
+                            mes.to_string()
                         } else {
                             format!("{}", errs.last().unwrap())
                         };

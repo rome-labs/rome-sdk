@@ -1,10 +1,11 @@
 use crate::engine::GethEngine;
 use async_trait::async_trait;
 use ethers::abi::AbiEncode;
-use ethers::prelude::{H256, U256};
+use ethers::prelude::{H256, U256, U64};
+use ethers::providers::{Http, Middleware};
 use rome_evm_client::error::ProgramResult;
 use rome_evm_client::error::RomeEvmError::Custom;
-use rome_evm_client::indexer::{BlockProducer, PendingBlocks, ProducedBlocks};
+use rome_evm_client::indexer::{BlockParams, BlockProducer, PendingBlocks, ProducedBlocks};
 use std::collections::BTreeMap;
 use std::ops::Add;
 use std::str::FromStr;
@@ -13,16 +14,59 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct EngineAPIBlockProducer {
     geth_engine: Arc<GethEngine>,
+    geth_api: ethers::providers::Provider<Http>,
 }
 
 impl EngineAPIBlockProducer {
-    pub fn new(geth_engine: Arc<GethEngine>) -> Self {
-        Self { geth_engine }
+    pub fn new(geth_engine: Arc<GethEngine>, geth_api: ethers::providers::Provider<Http>) -> Self {
+        Self {
+            geth_engine,
+            geth_api,
+        }
     }
 }
 
 #[async_trait]
 impl BlockProducer for EngineAPIBlockProducer {
+    async fn last_produced_block(&self) -> ProgramResult<U64> {
+        Ok(self.geth_api.get_block_number().await?)
+    }
+
+    async fn get_block_params(&self, block_number: U64) -> ProgramResult<BlockParams> {
+        let res = self
+            .geth_engine
+            .send_request(
+                "eth_getBlockByNumber",
+                vec![format!("0x{:x}", block_number).into(), false.into()],
+            )
+            .await
+            .map_err(|e| {
+                Custom(format!(
+                    "get_block_params: Failed to get block for {:?}: {:?}",
+                    block_number, e
+                ))
+            })?;
+
+        if let (Some(hash), parent_hash, Some(number), Some(timestamp)) = (
+            res.get("hash"),
+            res.get("parentHash"),
+            res.get("number"),
+            res.get("timestamp"),
+        ) {
+            Ok(BlockParams {
+                hash: H256::from_str(hash.as_str().unwrap()).unwrap(),
+                parent_hash: parent_hash.map(|v| H256::from_str(v.as_str().unwrap()).unwrap()),
+                number: U64::from_str(number.as_str().unwrap()).unwrap(),
+                timestamp: U256::from_str(timestamp.as_str().unwrap()).unwrap(),
+            })
+        } else {
+            Err(Custom(format!(
+                "Failed to decode response into BlockParams: {:?}",
+                res
+            )))
+        }
+    }
+
     async fn produce_blocks(
         &self,
         parent_hash: Option<H256>,
@@ -42,7 +86,7 @@ impl BlockProducer for EngineAPIBlockProducer {
         }
         .map_err(|e| {
             Custom(format!(
-                "Failed to get block for {:?}: {:?}",
+                "produce_blocks: Failed to get block for {:?}: {:?}",
                 parent_hash, e
             ))
         })?;

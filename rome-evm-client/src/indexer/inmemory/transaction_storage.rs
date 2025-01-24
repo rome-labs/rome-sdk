@@ -1,42 +1,15 @@
 use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
-use crate::indexer::parsers::block_parser::TxResult;
-use crate::indexer::{BlockParams, BlockParseResult, PendingBlocks, ProducedBlocks};
-use ethers::addressbook::Address;
-use ethers::prelude::{Transaction, TransactionReceipt, TxHash, H256};
-use ethers::types::{Bloom, Log, OtherFields, U256, U64};
-use serde::{Deserialize, Serialize};
+use crate::indexer::{
+    self, ethereum_block_storage::ReceiptParams, parsers::block_parser::TxResult, BlockParams,
+    BlockParseResult, PendingBlocks, ProducedBlocks,
+};
+use ethers::types::{Bloom, Log, OtherFields, Transaction, TransactionReceipt, TxHash, U256, U64};
 use solana_program::clock::Slot;
-use solana_program::keccak::hash;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Add;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-pub fn calc_contract_address(
-    from: &Address,
-    to: &Option<Address>,
-    nonce: &U256,
-) -> Option<Address> {
-    if to.is_some() {
-        return None;
-    }
-
-    let mut rlp = rlp::RlpStream::new_list(2);
-    rlp.append(from);
-    rlp.append(nonce);
-    let hash = hash(&rlp.out());
-    Some(Address::from(H256::from(hash.to_bytes())))
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ReceiptParams {
-    pub blockhash: H256,
-    pub block_number: U64,
-    pub tx_index: usize,
-    pub block_gas_used: U256,
-    pub first_log_index: U256,
-}
 
 struct IndexedResult {
     pub tx_result: TxResult,
@@ -100,12 +73,17 @@ impl TxContainer {
         &self,
         hashes: &[TxHash],
         slot_number: Slot,
-    ) -> ProgramResult<Vec<(Transaction, TxResult)>> {
-        let mut result = Vec::new();
+    ) -> ProgramResult<BTreeMap<usize, (Transaction, TxResult)>> {
+        let mut result = BTreeMap::new();
+        let mut tx_idx: usize = 0;
         for tx_hash in hashes {
             if let Some(inmemory_tx) = self.transactions.get(tx_hash) {
                 if let Some(indexed_tx) = inmemory_tx.results.get(&slot_number) {
-                    result.push((inmemory_tx.tx.clone(), indexed_tx.tx_result.clone()));
+                    result.insert(
+                        tx_idx,
+                        (inmemory_tx.tx.clone(), indexed_tx.tx_result.clone()),
+                    );
+                    tx_idx += 1;
                 }
             } else {
                 return Err(Custom(format!(
@@ -190,7 +168,7 @@ impl TxContainer {
                             .block_gas_used
                             .checked_add(indexed_result.tx_result.gas_report.gas_value)
                             .expect("This must never happen - block gas overflow!"),
-                        contract_address: calc_contract_address(
+                        contract_address: indexer::calc_contract_address(
                             &tx.tx.from,
                             &tx.tx.to,
                             &tx.tx.nonce,
@@ -325,7 +303,7 @@ impl TransactionStorage {
         &self,
         hashes: &[TxHash],
         slot_number: Slot,
-    ) -> ProgramResult<Vec<(Transaction, TxResult)>> {
+    ) -> ProgramResult<BTreeMap<usize, (Transaction, TxResult)>> {
         self.transactions
             .read()
             .await
@@ -345,7 +323,7 @@ impl TransactionStorage {
                     block_params,
                     &pending_block
                         .transactions
-                        .iter()
+                        .values()
                         .map(|(tx, _)| tx.hash)
                         .collect::<Vec<_>>(),
                 )?
@@ -402,7 +380,7 @@ mod test {
                 BTreeMap::from([(
                     block_id.clone(),
                     PendingBlock {
-                        transactions: vec![(tx.clone(), tx_result)],
+                        transactions: BTreeMap::from([(0, (tx.clone(), tx_result))]),
                         gas_recipient,
                         slot_timestamp: Some(0),
                     },
@@ -486,7 +464,7 @@ mod test {
                 BTreeMap::from([(
                     block_id.clone(),
                     PendingBlock {
-                        transactions: vec![(tx.clone(), tx_result)],
+                        transactions: BTreeMap::from([(0, (tx.clone(), tx_result))]),
                         gas_recipient: Some(gas_recipient),
                         slot_timestamp: Some(0),
                     },

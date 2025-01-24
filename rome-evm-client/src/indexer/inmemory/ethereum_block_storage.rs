@@ -1,9 +1,9 @@
 use crate::error::RomeEvmError::Custom;
-use crate::indexer::ethereum_block_storage::{EthBlockId, PendingBlock};
+use crate::indexer::ethereum_block_storage::{EthBlockId, PendingBlock, ReproduceBlocks};
 use crate::indexer::parsers::block_parser::EthBlock;
 use crate::indexer::{inmemory::TransactionStorage, BlockParams, PendingBlocks, ProducedBlocks};
 use async_trait::async_trait;
-use ethers::prelude::{BigEndianHash, Block, Transaction, TransactionReceipt, TxHash};
+use ethers::prelude::{Block, Transaction, TransactionReceipt, TxHash};
 use solana_program::clock::Slot;
 use std::collections::btree_map;
 use {
@@ -11,7 +11,7 @@ use {
         error::ProgramResult,
         indexer::{self, ethereum_block_storage::BlockType, BlockParseResult},
     },
-    ethers::types::{H256, U256, U64},
+    ethers::types::{H256, U64},
     std::{
         collections::{BTreeMap, HashMap},
         sync::Arc,
@@ -19,36 +19,7 @@ use {
     tokio::sync::{RwLock, RwLockWriteGuard},
 };
 
-const EMPTY_ROOT: [u8; 32] = [
-    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
-    0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
-];
-
 impl EthBlock {
-    fn get_block_base<B>(&self) -> Block<B> {
-        let tx_root = if self.transactions.is_empty() {
-            H256::from(EMPTY_ROOT)
-        } else {
-            H256::from_uint(&U256::one())
-        };
-
-        let block_params = self.block_params.as_ref();
-        BlockType::base::<B>(
-            block_params.map(|p| p.hash),
-            block_params
-                .as_ref()
-                .and_then(|p| p.parent_hash)
-                .unwrap_or_default(),
-            tx_root,
-            block_params.as_ref().map(|p| p.number),
-            self.block_gas_used,
-            block_params
-                .as_ref()
-                .map(|p| p.timestamp)
-                .unwrap_or_default(),
-        )
-    }
-
     pub async fn get_block(
         &self,
         full_transactions: bool,
@@ -177,7 +148,10 @@ impl EthereumBlockStorage {
             .and_then(|block| block.eth_blocks.get(*eth_block_idx))
             .cloned()
     }
+}
 
+#[async_trait]
+impl indexer::EthereumBlockStorage for EthereumBlockStorage {
     async fn get_pending_blocks(&self) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>> {
         let lock = self.blocks_by_sol_slot.read().await;
 
@@ -205,19 +179,19 @@ impl EthereumBlockStorage {
                         .get_pending_blocks(&mut pending_blocks, &self.transaction_storage)
                         .await?
                     {
-                        break parent_blockhash;
+                        break Some(parent_blockhash);
                     } else if current_slot != 0 {
                         current_slot = solana_block.parent_slot_number;
                     } else {
-                        return Ok(Some((None, pending_blocks)));
+                        break None;
                     }
                 } else {
-                    return Ok(Some((None, pending_blocks)));
+                    break None;
                 }
             };
 
             if !pending_blocks.is_empty() {
-                Ok(Some((Some(parent_blockhash), pending_blocks)))
+                Ok(Some((parent_blockhash, pending_blocks)))
             } else {
                 Ok(None)
             }
@@ -225,10 +199,15 @@ impl EthereumBlockStorage {
             Ok(None)
         }
     }
-}
 
-#[async_trait]
-impl indexer::EthereumBlockStorage for EthereumBlockStorage {
+    async fn reproduce_blocks(
+        &self,
+        _from_slot: Slot,
+        _to_slot: Slot,
+    ) -> ProgramResult<Option<(Option<TxHash>, ReproduceBlocks)>> {
+        Ok(None)
+    }
+
     async fn register_parse_results(
         &self,
         parse_results: BTreeMap<Slot, BlockParseResult>,
@@ -320,12 +299,7 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
                     block_params,
                 )
                 .await?;
-                tracing::info!("new block registered: {:?}", block_params);
-            } else {
-                return Err(Custom(format!(
-                    "blocks_produced: Pending block {:?} was not registered",
-                    block_id
-                )));
+                tracing::info!("new block registered {:?}:{:?}", block_id, block_params);
             }
         }
 
@@ -390,6 +364,11 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
 
     async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<Transaction>> {
         self.transaction_storage.get_transaction(tx_hash).await
+    }
+
+    async fn get_slot_for_eth_block(&self, block_number: U64) -> ProgramResult<Option<Slot>> {
+        let lock = self.blocks_by_number.read().await;
+        Ok(lock.get(&block_number).map(|block_id| block_id.0))
     }
 }
 
@@ -469,7 +448,7 @@ mod test {
             let mut blocks_processed = HashSet::new();
             let mut transactions_processed = 0;
             for (block_id, pending_block) in &pending_blocks {
-                for (tx, tx_result) in &pending_block.transactions {
+                for (_, (tx, tx_result)) in &pending_block.transactions {
                     let (expected_tx, expected_tx_result) =
                         &self.transactions[transactions_processed];
                     assert_eq!(
@@ -728,7 +707,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_registration_failed_due_to_absent_result() {
+    async fn test_absent_result_should_not_cause_block_production_to_fail() {
         let gas_recipient1 = Address::random();
         let gas_recipient2 = Address::random();
         let gas_recipient3 = Address::random();
@@ -796,7 +775,7 @@ mod test {
 
         let res = storage.blocks_produced(pending_blocks, results).await;
 
-        assert!(res.is_err());
+        assert!(!res.is_err());
     }
 
     #[tokio::test]

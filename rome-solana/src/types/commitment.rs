@@ -1,4 +1,3 @@
-use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use solana_sdk::commitment_config::{CommitmentConfig, CommitmentLevel};
 
@@ -21,7 +20,6 @@ impl TryFrom<CommitmentLevel> for Commitment {
             CommitmentLevel::Confirmed => Ok(Self::Confirmed),
             CommitmentLevel::Finalized => Ok(Self::Finalized),
             CommitmentLevel::Processed => Ok(Self::Processed),
-            _ => bail!("Invalid commitment level"),
         }
     }
 }

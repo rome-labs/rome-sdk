@@ -9,6 +9,7 @@ use ethers::prelude::{
 };
 use ethers::types::U64;
 use jsonrpsee_core::Serialize;
+use serde::Deserialize;
 use solana_program::clock::UnixTimestamp;
 use solana_sdk::clock::Slot;
 use std::collections::BTreeMap;
@@ -17,14 +18,14 @@ use std::collections::BTreeMap;
 // Consists of Solana slot number and index of the Eth block within this slot
 pub type EthBlockId = (Slot, usize);
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PendingBlock {
-    pub transactions: Vec<(Transaction, TxResult)>,
+    pub transactions: BTreeMap<usize, (Transaction, TxResult)>,
     pub gas_recipient: Option<Address>,
     pub slot_timestamp: Option<UnixTimestamp>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockParams {
     pub hash: H256,
     pub parent_hash: Option<H256>,
@@ -34,9 +35,14 @@ pub struct BlockParams {
 
 pub type PendingBlocks = BTreeMap<EthBlockId, PendingBlock>;
 pub type ProducedBlocks = BTreeMap<EthBlockId, BlockParams>;
+pub type ReproduceBlocks = BTreeMap<EthBlockId, (PendingBlock, BlockParams)>;
 
 #[async_trait]
 pub trait BlockProducer: Send + Sync {
+    async fn last_produced_block(&self) -> ProgramResult<U64>;
+
+    async fn get_block_params(&self, block_number: U64) -> ProgramResult<BlockParams>;
+
     // Builds chain from pending_blocks on top of block with given parent_hash in a given order
     async fn produce_blocks(
         &self,
@@ -123,6 +129,14 @@ impl BlockType {
 
 #[async_trait]
 pub trait EthereumBlockStorage: Send + Sync {
+    async fn get_pending_blocks(&self) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>>;
+
+    async fn reproduce_blocks(
+        &self,
+        from_slot: Slot,
+        to_slot: Slot,
+    ) -> ProgramResult<Option<(Option<H256>, ReproduceBlocks)>>;
+
     async fn register_parse_results(
         &self,
         parse_results: BTreeMap<Slot, BlockParseResult>,
@@ -158,4 +172,15 @@ pub trait EthereumBlockStorage: Send + Sync {
     ) -> ProgramResult<Option<TransactionReceipt>>;
 
     async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<Transaction>>;
+
+    async fn get_slot_for_eth_block(&self, block_number: U64) -> ProgramResult<Option<Slot>>;
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReceiptParams {
+    pub blockhash: H256,
+    pub block_number: U64,
+    pub tx_index: usize,
+    pub block_gas_used: U256,
+    pub first_log_index: U256,
 }

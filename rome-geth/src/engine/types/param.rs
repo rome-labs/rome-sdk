@@ -1,5 +1,6 @@
 // TODO: replace serde_json::Value with actual types of ethereum transactions
 // NOTE: don't use ethers-rs types, it's deprecated and un-compatible with other dependencies
+use bigdecimal::BigDecimal;
 use serde::{Deserialize, Serialize};
 
 /// Forkchoice update parameters
@@ -61,7 +62,9 @@ pub struct ExecutionPayload {
     pub rome_gas_used: Option<Vec<u64>>,
     pub timestamp: u64,
     pub extra_data: String,
-    pub base_fee_per_gas: Option<u128>,
+
+    #[serde(with = "bigdecimal::serde::json_num_option")]
+    pub base_fee_per_gas: Option<BigDecimal>,
     pub block_hash: String,
     pub transactions: Vec<serde_json::Value>,
     pub withdrawals: Option<Vec<serde_json::Value>>,

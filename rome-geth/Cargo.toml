@@ -10,19 +10,14 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 rome-utils = { workspace = true }
 tracing = { workspace = true }
-solana-client = { workspace = true }
-solana-sdk = { workspace = true }
 ethers = { workspace = true }
-rome-solana = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 jsonwebtoken = { workspace = true }
 url = { workspace = true }
-rlp = { workspace = true }
-hex = { workspace = true }
-ethnum = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 rome-evm-client = { workspace = true }
+bigdecimal = {workspace = true}

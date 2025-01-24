@@ -35,10 +35,10 @@ pub struct GethEngine {
 
 impl GethEngine {
     /// Create a new GethEngine instance
-    pub fn new(config: GethEngineConfig) -> Self {
+    pub fn new(config: &GethEngineConfig) -> Self {
         Self {
-            _client: JsonRpcClient::new(config.geth_engine_addr),
-            geth_engine_secret: config.geth_engine_secret,
+            _client: JsonRpcClient::new(config.geth_engine_addr.clone()),
+            geth_engine_secret: config.geth_engine_secret.clone(),
             headers: Arc::new(RwLock::new(HeaderMap::default())),
         }
     }
@@ -121,14 +121,14 @@ impl GethEngine {
 
         let gas_prices: Vec<u64> = pending_block
             .transactions
-            .iter()
+            .values()
             .filter_map(|(tx, _)| tx.gas_price)
             .map(|price| price.as_u64())
             .collect();
 
         let tx_results: Vec<&TxResult> = pending_block
             .transactions
-            .iter()
+            .values()
             .map(|(_, tx_result)| tx_result)
             .collect();
 
@@ -140,7 +140,7 @@ impl GethEngine {
         let forkchoice_params = ForkchoiceUpdateParams {
             transactions: pending_block
                 .transactions
-                .iter()
+                .values()
                 .map(|(tx, _)| serde_json::Value::from(tx.rlp().to_string()))
                 .collect(),
             timestamp: format!("0x{:x}", timestamp),

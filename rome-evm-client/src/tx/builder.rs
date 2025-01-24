@@ -6,19 +6,17 @@ use crate::{
 use bincode::serialize;
 use emulator::{emulate, Emulation};
 use ethers::types::{Bytes, TxHash};
-use rome_evm::{ExitReason, NUMBER_OPCODES_PER_TX};
 use rome_solana::{batch::AdvanceTx, types::SyncAtomicRpcClient};
 use serde_json::json;
 use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_program::{
-    entrypoint::MAX_PERMITTED_DATA_INCREASE,
     hash::Hash,
     instruction::{AccountMeta, Instruction},
 };
 use solana_sdk::{bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey};
 use solana_transaction_status::UiTransactionEncoding;
 
-use crate::indexer::parsers::log_parser;
+use crate::util::check_exit_reason;
 use rome_solana::batch::OwnedAtomicIxBatch;
 use solana_sdk::signer::keypair::Keypair;
 
@@ -68,30 +66,9 @@ impl TxBuilder {
         tracing::info!("Emulating Transaction with payer: {:?}", payer);
 
         let emulation = emulate(&self.program_id, data, payer, self.rpc_client.clone())?;
-        Self::check_emulation(&emulation)?;
+        check_exit_reason(&emulation)?;
 
         Ok(emulation)
-    }
-
-    // check for revert
-    pub fn check_emulation(emulation: &Emulation) -> ProgramResult<()> {
-        if let Some(vm) = emulation.vm.as_ref() {
-            return match vm.exit_reason {
-                ExitReason::Succeed(_) => Ok(()),
-                ExitReason::Revert(_) => {
-                    let mes = vm
-                        .return_value
-                        .as_ref()
-                        .and_then(|value| log_parser::decode_revert(value))
-                        .unwrap_or_default();
-                    let data = vm.return_value.clone().unwrap_or_default();
-                    Err(RomeEvmError::Revert(mes, data))
-                }
-
-                exit_reason => Err(RomeEvmError::ExitReason(exit_reason)),
-            };
-        }
-        Ok(())
     }
 
     fn build_atomic(
@@ -165,12 +142,8 @@ impl TxBuilder {
             vm.steps_executed, emulation.allocated, emulation.syscalls
         );
 
-        let is_atomic_tx = vm.steps_executed <= NUMBER_OPCODES_PER_TX
-            && emulation.allocated <= MAX_PERMITTED_DATA_INCREASE
-            && emulation.syscalls < 64;
-
         tracing::info!("Building Transaction");
-        if is_atomic_tx {
+        if emulation.is_atomic {
             self.build_atomic(atomic_tx, rlp, tx_hash)
         } else {
             self.build_iterative(atomic_tx.resource, rlp, tx_hash)

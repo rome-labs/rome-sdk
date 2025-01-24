@@ -28,7 +28,10 @@ impl Default for SolanaBlockStorage {
 
 #[async_trait]
 impl indexer::SolanaBlockStorage for SolanaBlockStorage {
-    async fn store_blocks(&self, blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>) -> ProgramResult<()> {
+    async fn store_blocks(
+        &self,
+        blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
+    ) -> ProgramResult<()> {
         let mut lock = self.block_cache.write().await;
         for (slot_number, block) in blocks {
             lock.insert(slot_number, block);

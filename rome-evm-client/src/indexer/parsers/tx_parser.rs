@@ -83,20 +83,13 @@ impl EvmTx {
         }
     }
 
-    pub fn build(&self, slot_number: Slot) -> ProgramResult<Transaction> {
-        if self.is_data_complete() {
-            return match self {
-                EvmTx::SmallEvmTx { transaction } => Ok(transaction.clone()),
-                EvmTx::BigEvmTx { holder_data, .. } => {
-                    decode_transaction_from_rlp(&Rlp::new(holder_data.as_slice()))
-                }
-            };
+    pub fn build(&self) -> ProgramResult<Transaction> {
+        match self {
+            EvmTx::SmallEvmTx { transaction } => Ok(transaction.clone()),
+            EvmTx::BigEvmTx { holder_data, .. } => {
+                decode_transaction_from_rlp(&Rlp::new(holder_data.as_slice()))
+            }
         }
-
-        Err(Custom(format!(
-            "Transaction is not complete on slot {:?}",
-            slot_number
-        )))
     }
 }
 
@@ -158,12 +151,32 @@ impl TxParser {
         {
             btree_map::Entry::Vacant(entry) => {
                 entry.insert((tx_hash, tx_result));
-                Ok(())
             }
-            btree_map::Entry::Occupied(_) => Err(Custom(format!(
-                "tx_idx {tx_idx} in slot {slot} already occupied"
-            ))),
+            btree_map::Entry::Occupied(mut entry) => {
+                let (ex_tx_hash, ex_tx_result) = entry.get_mut();
+                if !tx_hash.eq(ex_tx_hash) {
+                    tracing::warn!(
+                        "Transaction {tx_idx} on slot {slot} \
+                        is going to be replaced by new one: {:?} -> {:?}",
+                        ex_tx_hash,
+                        tx_hash
+                    );
+                    *ex_tx_hash = tx_hash;
+                }
+
+                if !tx_result.eq(&ex_tx_result) {
+                    tracing::warn!(
+                        "Transaction result {tx_idx} on slot {slot} \
+                        is going to be replaced by new one: {:?} -> {:?}",
+                        ex_tx_result,
+                        tx_result,
+                    );
+                    *ex_tx_result = tx_result;
+                }
+            }
         }
+
+        Ok(())
     }
 
     pub fn register_small_tx(
@@ -242,12 +255,13 @@ impl TxParser {
             for (tx_hash, tx_result) in slot_txs.values() {
                 if let Some(tx_result) = tx_result {
                     if let Some(tx) = self.transactions_by_hash.get(tx_hash) {
-                        results.push((tx.build(slot_number)?, tx_result.clone()));
+                        if tx.is_data_complete() {
+                            results.push((tx.build()?, tx_result.clone()));
+                        } else {
+                            return Err(Custom(format!("Tx {:?} data is not complete ", tx_hash)));
+                        }
                     } else {
-                        return Err(Custom(format!(
-                            "Transaction {:?} on slot {:?} is not ready to be finalized",
-                            tx_hash, slot_number
-                        )));
+                        return Err(Custom(format!("Tx {:?} not found by hash", tx_hash)));
                     }
                 }
             }

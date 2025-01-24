@@ -7,7 +7,7 @@ use rome_evm_client::rome_evm::H160 as EvmH160;
 use rome_evm_client::tx::CrossChainTx;
 use rome_evm_client::tx::CrossRollupTx;
 use rome_evm_client::tx::TxBuilder;
-use rome_evm_client::util::RomeEvmUtil;
+use rome_evm_client::util::{check_exit_reason, RomeEvmUtil};
 use rome_evm_client::Resource;
 use rome_evm_client::{emulator, resources::Payer};
 use rome_solana::batch::AdvanceTx;
@@ -160,7 +160,7 @@ impl Rome {
             client,
         )?;
 
-        TxBuilder::check_emulation(&emulation)?;
+        check_exit_reason(&emulation)?;
 
         Ok(emulation.gas.into())
     }

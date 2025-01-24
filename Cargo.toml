@@ -35,13 +35,12 @@ borsh-derive = "0.9.3"
 # evm
 ethnum = { version = "1.5.0", default-features = false, features = ["serde"] }
 # not using latest due to rome-rollup-program
-solana-sdk = "1.18.17"
-solana-client = "1.18.17"
-solana-program = "1.18.17"
-solana-transaction-status = "1.18.17"
-solana-geyser-plugin-interface = "1.18.17"
-solana-rpc-client-api = "1.18.17"
-solana-quic-client = "1.18.17"
+solana-sdk = "2.1.7"
+solana-client = "2.1.7"
+solana-program = "2.1.7"
+solana-transaction-status = "2.1.7"
+solana-rpc-client-api = "2.1.7"
+solana-quic-client = "2.1.7"
 # kafka
 kafka = "0.10.0"
 # compression (emulator client)
@@ -58,7 +57,7 @@ dotenv = "0.15.0"
 url = { version = "2.5.2", features = ["serde"] }
 rand = "0.8.5"
 jsonrpsee-core = "0.24.1"
-ripemd = "0.1"
+bigdecimal = { version = "0.4.7", features = ["serde", "serde_json"] }
 # Rome da
 sha3 = "0.10.1"
 diesel = { version = "2.2.4", features = ["postgres", "r2d2", "serde_json"] }

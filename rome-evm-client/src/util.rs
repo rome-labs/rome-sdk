@@ -1,5 +1,10 @@
+use crate::{
+    error::{ProgramResult, RomeEvmError},
+    indexer::parsers::log_parser,
+};
+use emulator::Emulation;
 use ethers::types::{NameOrAddress, TransactionRequest, U256};
-use rome_evm::{tx::legacy::Legacy as LegacyTx, H160 as EvmH160};
+use rome_evm::{tx::legacy::Legacy as LegacyTx, ExitReason, H160 as EvmH160};
 
 pub struct RomeEvmUtil;
 
@@ -31,6 +36,38 @@ impl RomeEvmUtil {
                 .unwrap_or(chain_id.into()),
             from: value.from.map(|v| EvmH160::from(v.0)).unwrap_or_default(),
             ..Default::default()
+        }
+    }
+}
+
+// check for revert
+pub fn check_exit_reason(emulation: &Emulation) -> ProgramResult<()> {
+    let Some(vm) = emulation.vm.as_ref() else {
+        return Ok(());
+    };
+
+    match vm.exit_reason {
+        ExitReason::Succeed(_) => Ok(()),
+        ExitReason::Revert(_) => {
+            let mes = vm
+                .return_value
+                .as_ref()
+                .and_then(|value| log_parser::decode_revert(value))
+                .map(|a| format!("execution reverted: {}", a))
+                .unwrap_or("execution reverted".to_string());
+
+            let data = vm
+                .return_value
+                .as_ref()
+                .map(|a| format!("0x{}", hex::encode(a)))
+                .unwrap_or("0x".to_string());
+
+            Err(RomeEvmError::EmulationRevert(mes, data))
+        }
+        ExitReason::Error(e) => Err(RomeEvmError::EmulationError(format!("{:?}", e))),
+        ExitReason::Fatal(e) => Err(RomeEvmError::EmulationError(format!("{:?}", e))),
+        ExitReason::StepLimitReached => {
+            Err(RomeEvmError::EmulationError("StepLimitReached".to_string()))
         }
     }
 }

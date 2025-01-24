@@ -103,14 +103,22 @@ impl AdvanceTx<'_> for IterativeTxHolder {
             Steps::Confirm => {
                 self.step = Steps::Complete;
 
-                let confirm = self.transmit_tx.tx_builder.confirm_tx_iterative(
+                match self.transmit_tx.tx_builder.confirm_tx_iterative(
                     self.transmit_tx.resource.holder_index(),
                     self.transmit_tx.hash,
                     &self.transmit_tx.resource.payer_key(),
                     self.session,
-                )?;
-
-                Ok(IxExecStepBatch::ConfirmationIterativeTx(confirm))
+                ) {
+                    Ok(confirm) => Ok(IxExecStepBatch::ConfirmationIterativeTx(confirm)),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to get status of iterative tx, tx_hash: {}, error: {}",
+                            self.transmit_tx.hash,
+                            e
+                        );
+                        Ok(IxExecStepBatch::ConfirmationIterativeTx(false))
+                    }
+                }
             }
             _ => Ok(IxExecStepBatch::End),
         }

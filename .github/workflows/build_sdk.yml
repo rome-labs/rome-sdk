@@ -34,21 +34,8 @@ jobs:
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             EVM_BRANCH_NAME="${{ github.event.inputs.rome_evm_branch }}"
           else
-            # Check if the SDK branch is main (i.e., the default branch)
-            SDK_BRANCH="${{ github.ref_name }}"
-            if [ "$SDK_BRANCH" == "main" ]; then
-              EVM_BRANCH_NAME="main"
-            else
-               # Get branch name from commit message or default to main if not provided
-               if [[ "${{ github.event.head_commit.message }}" =~ "rome-evm-branch:" ]]; then
-                EVM_BRANCH_NAME=$(echo "${{ github.event.head_commit.message }}" | grep -oP 'rome-evm-branch:\s*\K\S+')
-               else
-                EVM_BRANCH_NAME="main"
-               fi
-            fi
+            EVM_BRANCH_NAME="main"
           fi
-          
-          
           echo "evm_branch_name=$EVM_BRANCH_NAME" >> $GITHUB_ENV
 
       - name: 'Checkout EVM repository'
@@ -59,25 +46,9 @@ jobs:
           ref: ${{ env.evm_branch_name }}
           token: ${{ secrets.GIT_ROLLUP_TOKEN }}
 
-      - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: 'Build rome-sdk'
+        uses: docker/build-push-action@v4.0.0
         with:
-          toolchain: stable
-
-      - name: Install Solana
-        uses: metadaoproject/setup-solana@v1.0
-        with:
-          solana-cli-version: 1.18.17
-
-      - name: Add Solana to PATH
-        run: echo "/root/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
-        shell: bash
-
-      - name: Check Solana version
-        run: solana --version
-
-      - name: Build Rome SDK with warnings treated as errors
-        run: |
-          ls -l
-          cd rome-sdk
-          RUSTFLAGS="-D warnings" cargo build --release
+          context: .
+          push: false
+          file: rome-sdk/Dockerfile
