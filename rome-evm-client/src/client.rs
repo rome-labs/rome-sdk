@@ -1,14 +1,13 @@
 use rome_solana::tower::SolanaTower;
 use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
-use std::collections::BTreeMap;
 
 use crate::error::RomeEvmError::Custom;
 use crate::error::{ProgramResult, RomeEvmError};
 use crate::indexer::{
-    BlockParams, BlockProducer, PendingBlocks, ProducedBlocks, SolanaBlockStorage,
+    BlockParams, BlockProducer, ProducedBlocks, ProductionResult, SolanaBlockStorage,
     StandaloneIndexer,
 };
-use crate::indexer::{BlockType, EthereumBlockStorage};
+use crate::indexer::{BlockType, EthereumBlockStorage, ProducerParams};
 use crate::tx::TxBuilder;
 use crate::util::{check_exit_reason, RomeEvmUtil};
 use crate::Payer;
@@ -78,14 +77,15 @@ impl BlockProducer for DummyBlockProducer {
 
     async fn produce_blocks(
         &self,
-        mut parent_hash: Option<H256>,
-        pending_blocks: &PendingBlocks,
-    ) -> ProgramResult<ProducedBlocks> {
-        let mut results = BTreeMap::new();
-        for (block_id, pending_block) in pending_blocks {
+        producer_params: &ProducerParams,
+        limit: Option<usize>,
+    ) -> ProgramResult<ProductionResult> {
+        let mut parent_hash = producer_params.parent_hash;
+        let mut produced_blocks = ProducedBlocks::new();
+        for (block_id, pending_block) in &producer_params.pending_blocks {
             let block_number = self.next_block.fetch_add(1, Ordering::Relaxed);
             let blockhash = H256::random();
-            results.insert(
+            produced_blocks.insert(
                 *block_id,
                 BlockParams {
                     hash: blockhash,
@@ -95,9 +95,18 @@ impl BlockProducer for DummyBlockProducer {
                 },
             );
             parent_hash = Some(blockhash);
+
+            if let Some(limit) = limit {
+                if produced_blocks.len() >= limit {
+                    break;
+                }
+            }
         }
 
-        Ok(results)
+        Ok(ProductionResult {
+            produced_blocks,
+            finalized_block: H256::zero(),
+        })
     }
 }
 

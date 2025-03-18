@@ -1,8 +1,11 @@
 use crate::error::RomeEvmError::Custom;
 use crate::error::{ProgramResult, RomeEvmError};
-use crate::indexer::ethereum_block_storage::ReproduceBlocks;
+use crate::indexer::ethereum_block_storage::{
+    EthBlockId, FinalizedBlock, ProducerParams, ReproduceParams,
+};
 use crate::indexer::parsers::block_parser::EthBlock;
 use crate::indexer::pg_storage::transaction_storage::TransactionStorage;
+use crate::indexer::pg_storage::types::SlotStatus;
 use crate::indexer::{
     self, pg_storage::PgPool, BlockParams, BlockParseResult, BlockType, PendingBlock,
     PendingBlocks, ProducedBlocks, ReceiptParams, TxResult,
@@ -44,17 +47,18 @@ impl ToSql<Jsonb, Pg> for TxResult {
 }
 
 #[derive(Queryable, Selectable, Debug)]
-#[diesel(table_name = schema::pending_transactions)]
+#[diesel(table_name = schema::pending_transactions_with_slot_statuses)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct PendingTx {
     slot_number: i64,
-    parent_slot: i64,
-    slot_block_idx: Option<i32>,
+    slot_status: SlotStatus,
+    slot_block_idx: i32,
     gas_recipient: Option<String>,
     slot_timestamp: Option<i64>,
-    tx_idx: Option<i32>,
-    rlp: Option<Vec<u8>>,
-    tx_result: Option<serde_json::Value>,
+    blockhash: Option<String>,
+    tx_idx: i32,
+    rlp: Vec<u8>,
+    tx_result: serde_json::Value,
 }
 
 #[derive(QueryableByName, Debug)]
@@ -267,21 +271,18 @@ mod schema {
     use diesel;
 
     diesel::table! {
-        pending_transactions (slot_number, slot_block_idx, tx_idx) {
+        pending_transactions_with_slot_statuses (slot_number, slot_block_idx, tx_idx) {
             slot_number -> BigInt,
-            parent_slot -> BigInt,
-            slot_block_idx -> Nullable<Integer>,
+            slot_status -> crate::indexer::pg_storage::types::SlotStatusMapping,
+            slot_block_idx -> Integer,
             gas_recipient -> Nullable<VarChar>,
             slot_timestamp -> Nullable<BigInt>,
-            tx_idx -> Nullable<Integer>,
-            rlp -> Nullable<Bytea>,
-            tx_result -> Nullable<Jsonb>,
+            blockhash -> Nullable<VarChar>,
+            tx_idx -> Integer,
+            rlp -> Bytea,
+            tx_result -> Jsonb,
         }
     }
-}
-
-define_sql_function! {
-    fn get_last_produced_block(slot: BigInt) -> Nullable<VarChar>;
 }
 
 define_sql_function! {
@@ -315,52 +316,52 @@ impl EthereumBlockStorage {
         }
     }
 
-    fn get_last_produced_block(&self, slot: Slot) -> ProgramResult<Option<H256>> {
-        let res = diesel::select(get_last_produced_block(slot as i64))
-            .get_result::<Option<String>>(&mut self.pool.get()?)?;
-
-        if let Some(res) = res {
-            Ok(Some(H256::from_str(&res).unwrap_or_else(|_| {
-                panic!(
-                    "DB data corrupted: Failed to decode last produced block from {:?} on slot {:?}",
-                    res, slot,
-                )
-            })))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[async_trait]
-impl indexer::EthereumBlockStorage for EthereumBlockStorage {
-    async fn get_pending_blocks(&self) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>> {
-        use self::schema::pending_transactions::dsl::*;
-        let mut parent_slots = BTreeMap::new();
+    async fn get_pending_blocks(&self) -> ProgramResult<Option<ProducerParams>> {
+        use self::schema::pending_transactions_with_slot_statuses::dsl::*;
+        let mut finalized_blocks = BTreeMap::new();
+        let mut produced_blocks = BTreeMap::new();
         let mut pending_blocks = PendingBlocks::new();
 
-        for tx in pending_transactions
+        for tx in pending_transactions_with_slot_statuses
             .select(PendingTx::as_select())
             .load::<PendingTx>(&mut self.pool.get()?)?
         {
-            parent_slots.insert(tx.slot_number as Slot, tx.parent_slot as Slot);
+            let block_id: EthBlockId = (tx.slot_number as Slot, tx.slot_block_idx as usize);
+            if tx.slot_status == SlotStatus::Finalized {
+                finalized_blocks
+                    .entry(block_id)
+                    .or_insert_with(|| tx.blockhash
+                        .clone()
+                        .map(|v| H256::from_str(&v)
+                            .unwrap_or_else(
+                                |_| panic!(
+                                    "DB data corrupted: Failed to decode finalized blockhash {:?} for block {:?}",
+                                    v, block_id
+                                )
+                            )
+                        )
+                    );
+            }
 
-            if let (
-                Some(slot_block_idx_val),
-                Some(tx_idx_val),
-                Some(rlp_val),
-                Some(tx_result_val),
-            ) = (&tx.slot_block_idx, &tx.tx_idx, &tx.rlp, &tx.tx_result)
-            {
+            if let Some(blockhash_val) = tx.blockhash {
+                produced_blocks
+                    .entry(block_id)
+                    .or_insert_with(|| H256::from_str(&blockhash_val).unwrap_or_else(|_| {
+                        panic!(
+                            "DB data corrupted: Failed to decode produced blockhash {:?} for block {:?}",
+                            blockhash_val, block_id,
+                        )
+                    }));
+            } else {
                 let pending_block = pending_blocks
-                    .entry((tx.slot_number as Slot, *slot_block_idx_val as usize))
+                    .entry(block_id)
                     .or_insert_with(|| PendingBlock::new_from_pending_tx(&tx));
 
-                match pending_block.transactions.entry(*tx_idx_val as usize) {
+                match pending_block.transactions.entry(tx.tx_idx as usize) {
                     btree_map::Entry::Vacant(entry) => {
                         entry.insert((
-                            Transaction::decode(&Rlp::new(rlp_val))?,
-                            serde_json::from_value(tx_result_val.clone())?,
+                            Transaction::decode(&Rlp::new(&tx.rlp))?,
+                            serde_json::from_value(tx.tx_result.clone())?,
                         ));
                     }
                     btree_map::Entry::Occupied(_) => {
@@ -372,37 +373,46 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
 
         if pending_blocks.is_empty() {
             Ok(None)
-        } else if let Some((_, parent)) = parent_slots.pop_first() {
-            Ok(Some((
-                self.get_last_produced_block(parent)?,
-                pending_blocks,
-            )))
         } else {
-            Ok(Some((None, pending_blocks)))
+            Ok(Some(ProducerParams {
+                pending_blocks,
+                parent_hash: produced_blocks.last_entry().map(|e| *e.get()),
+                finalized_block: finalized_blocks.last_entry().map(|e| {
+                    if let Some(blockhash_val) = e.get() {
+                        FinalizedBlock::Produced(*blockhash_val)
+                    } else {
+                        FinalizedBlock::Pending(*e.key())
+                    }
+                }),
+            }))
         }
     }
+}
 
+#[async_trait]
+impl indexer::EthereumBlockStorage for EthereumBlockStorage {
     async fn reproduce_blocks(
         &self,
         from_slot: Slot,
         to_slot: Slot,
-    ) -> ProgramResult<Option<(Option<H256>, ReproduceBlocks)>> {
+    ) -> ProgramResult<Option<ReproduceParams>> {
         let rows: Vec<ReproducedBlockRow> =
             diesel::sql_query("SELECT * FROM reproduce_blocks($1, $2)")
                 .bind::<BigInt, _>(from_slot as i64)
                 .bind::<BigInt, _>(to_slot as i64)
                 .load(&mut self.pool.get()?)?;
 
-        let mut result = ReproduceBlocks::new();
+        let mut pending_blocks = PendingBlocks::new();
+        let mut expected_results = BTreeMap::new();
+
         for row in rows {
-            let (pending_block, _) = result
-                .entry((row.slot_number as Slot, row.slot_block_idx as usize))
-                .or_insert_with(|| {
-                    (
-                        PendingBlock::new_from_reproduced_block_row(&row),
-                        BlockParams::new_from_reproduced_block_row(&row),
-                    )
-                });
+            let block_id: EthBlockId = (row.slot_number as Slot, row.slot_block_idx as usize);
+            let pending_block = pending_blocks
+                .entry(block_id)
+                .or_insert_with(|| PendingBlock::new_from_reproduced_block_row(&row));
+            expected_results
+                .entry(block_id)
+                .or_insert_with(|| BlockParams::new_from_reproduced_block_row(&row));
 
             match pending_block.transactions.entry(row.tx_idx as usize) {
                 btree_map::Entry::Vacant(entry) => {
@@ -420,20 +430,26 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
             }
         }
 
-        Ok(if result.is_empty() {
+        Ok(if pending_blocks.is_empty() {
             None
         } else {
-            Some((
-                result.first_entry().and_then(|e| e.get().1.parent_hash),
-                result,
-            ))
+            Some(ReproduceParams {
+                producer_params: ProducerParams {
+                    parent_hash: expected_results
+                        .first_entry()
+                        .and_then(|e| e.get().parent_hash),
+                    pending_blocks,
+                    finalized_block: None,
+                },
+                expected_results,
+            })
         })
     }
 
     async fn register_parse_results(
         &self,
         parse_results: BTreeMap<Slot, BlockParseResult>,
-    ) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>> {
+    ) -> ProgramResult<Option<ProducerParams>> {
         if !parse_results.is_empty() {
             self.transaction_storage
                 .register_parse_results(&parse_results)
@@ -565,14 +581,14 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
 
     async fn blocks_produced(
         &self,
-        pending_blocks: PendingBlocks,
+        producer_params: &ProducerParams,
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()> {
         self.pool
             .get()?
             .transaction::<(), RomeEvmError, _>(|conn| {
-                for block_id in pending_blocks.keys() {
-                    if let Some(block_params) = produced_blocks.get(block_id) {
+                for (block_id, block_params) in &produced_blocks {
+                    if producer_params.pending_blocks.contains_key(block_id) {
                         diesel::sql_query("CALL block_produced($1, $2, $3)")
                             .bind::<BigInt, _>(block_id.0 as i64)
                             .bind::<Integer, _>(block_id.1 as i32)
@@ -587,7 +603,7 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
             })?;
 
         self.transaction_storage
-            .blocks_produced(pending_blocks, produced_blocks)
+            .blocks_produced(&producer_params.pending_blocks, produced_blocks)
             .await?;
 
         Ok(())
@@ -626,5 +642,13 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
                 .get_result::<Option<i64>>(&mut self.pool.get()?)?
                 .map(|res| res as Slot),
         )
+    }
+
+    async fn clean_from_slot(&self, from_slot: Slot) -> ProgramResult<()> {
+        diesel::sql_query("CALL clean_from_slot($1)")
+            .bind::<BigInt, _>(from_slot as i64)
+            .execute(&mut self.pool.get()?)?;
+
+        Ok(())
     }
 }

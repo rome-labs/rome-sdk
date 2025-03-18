@@ -31,6 +31,7 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
     async fn store_blocks(
         &self,
         blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
+        _finalized_slot: Slot,
     ) -> ProgramResult<()> {
         let mut lock = self.block_cache.write().await;
         for (slot_number, block) in blocks {
@@ -38,6 +39,13 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
         }
 
         Ok(())
+    }
+
+    async fn update_finalized_blocks(
+        &self,
+        _blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
+    ) -> ProgramResult<()> {
+        todo!()
     }
 
     async fn get_block(&self, slot_number: Slot) -> ProgramResult<Option<Arc<UiConfirmedBlock>>> {
@@ -61,5 +69,12 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
             .iter()
             .last()
             .map(|(slot, _)| *slot))
+    }
+
+    async fn set_finalized_slot(
+        &self,
+        _slot: Slot,
+    ) -> ProgramResult<BTreeMap<Slot, UiConfirmedBlock>> {
+        Ok(BTreeMap::new())
     }
 }

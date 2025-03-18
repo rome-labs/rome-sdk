@@ -1,7 +1,7 @@
 use crate::indexer::parsers::block_parser::TxResult;
 use ethers::prelude::TxHash;
 use rlp::Decodable;
-use std::collections::{btree_map, HashMap};
+use std::collections::HashMap;
 use {
     crate::error::{ProgramResult, RomeEvmError::Custom},
     ethers::types::Transaction,
@@ -93,12 +93,42 @@ impl EvmTx {
     }
 }
 
+#[derive(Clone)]
+pub enum ParsedTxStep {
+    SmallTx {
+        tx: Transaction,
+        tx_result: Option<TxResult>,
+    },
+
+    BigTx {
+        tx_result: Option<TxResult>,
+    },
+
+    TransmitTx {
+        offset: usize,
+        data: Vec<u8>,
+    },
+}
+
+impl ParsedTxStep {
+    pub fn result(&self) -> Option<TxResult> {
+        match self {
+            ParsedTxStep::SmallTx { tx_result, .. } => tx_result.clone(),
+            ParsedTxStep::BigTx { tx_result, .. } => tx_result.clone(),
+            ParsedTxStep::TransmitTx { .. } => None,
+        }
+    }
+}
+
+pub type TxSteps = BTreeMap<usize, ParsedTxStep>;
+pub type ParsedTxs = HashMap<TxHash, TxSteps>;
+
 pub struct TxParser {
     // Transaction Hash -> EvmTx
     transactions_by_hash: HashMap<TxHash, EvmTx>,
 
-    // Ordered index: Solana slot -> TxIndex -> Internal Index
-    transactions_by_slot: BTreeMap<Slot, BTreeMap<usize, (TxHash, Option<TxResult>)>>,
+    // Ordered index: Solana slot -> TxHash -> (Tx Index, TxResult)
+    results_by_slot: BTreeMap<Slot, HashMap<TxHash, BTreeMap<usize, Option<TxResult>>>>,
 }
 
 impl Default for TxParser {
@@ -111,137 +141,115 @@ impl TxParser {
     pub fn new() -> Self {
         Self {
             transactions_by_hash: HashMap::new(),
-            transactions_by_slot: BTreeMap::new(),
+            results_by_slot: BTreeMap::new(),
         }
     }
 
-    fn update_or_create_transaction(
+    pub fn register_slot_transactions(
         &mut self,
-        tx_hash: TxHash,
-        slot: Slot,
-        tx_idx: usize,
-        tx_result: Option<TxResult>,
-        create_tx: impl FnOnce() -> EvmTx,
-        update_tx: impl FnOnce(&mut EvmTx) -> ProgramResult<()>,
+        slot_number: Slot,
+        slot_txs: ParsedTxs,
     ) -> ProgramResult<()> {
-        update_tx(
-            self.transactions_by_hash
-                .entry(tx_hash)
-                .or_insert_with(create_tx),
-        )?;
+        // 1-st remove non-existing transactions and update changed results
+        if let Some(existing_slot_txs) = self.results_by_slot.get_mut(&slot_number) {
+            existing_slot_txs.retain(|ex_tx_hash, ex_tx_results| {
+                if let Some(new_tx_steps) = slot_txs.get(ex_tx_hash) {
+                    // Remove tx results which are absent in new data and update those which were changed
+                    ex_tx_results.retain(|ex_tx_idx, ex_tx_result| {
+                        if let Some(new_tx_step) = new_tx_steps.get(ex_tx_idx) {
+                            let new_tx_result = new_tx_step.result();
+                            if !new_tx_result.eq(ex_tx_result) {
+                                tracing::warn!(
+                                    "Transaction {:?} result on slot {slot_number} \
+                                    is going to be replaced by new one: {:?} -> {:?}",
+                                    ex_tx_hash,
+                                    ex_tx_result,
+                                    new_tx_result,
+                                );
 
-        if tx_result.is_some()
-            && self.transactions_by_slot.iter().any(|(_, slot_results)| {
-                slot_results
-                    .iter()
-                    .any(|(_, (hash, tx_result))| tx_hash.eq(hash) && tx_result.is_some())
+                                *ex_tx_result = new_tx_result;
+                            }
+
+                            true // retain tx result
+                        } else {
+                            tracing::warn!(
+                                "Transaction {:?} result removed from slot {:?} on tx idx {:?}",
+                                ex_tx_hash,
+                                slot_number,
+                                ex_tx_idx
+                            );
+
+                            false // remove tx result
+                        }
+                    });
+
+                    true // retain tx results
+                } else {
+                    tracing::info!(
+                        "Transaction result {:?} removed from slot {:?}",
+                        ex_tx_hash,
+                        slot_number
+                    );
+                    false // remove all tx results from this slot
+                }
             })
-        {
-            return Err(Custom(format!(
-                "Transaction {:?} already has registered result in slot {:?}",
-                tx_hash, slot,
-            )));
         }
 
-        match self
-            .transactions_by_slot
-            .entry(slot)
-            .or_default()
-            .entry(tx_idx)
-        {
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert((tx_hash, tx_result));
-            }
-            btree_map::Entry::Occupied(mut entry) => {
-                let (ex_tx_hash, ex_tx_result) = entry.get_mut();
-                if !tx_hash.eq(ex_tx_hash) {
-                    tracing::warn!(
-                        "Transaction {tx_idx} on slot {slot} \
-                        is going to be replaced by new one: {:?} -> {:?}",
-                        ex_tx_hash,
-                        tx_hash
-                    );
-                    *ex_tx_hash = tx_hash;
-                }
+        for (tx_hash, tx_steps) in slot_txs {
+            for (tx_idx, tx_step) in tx_steps {
+                let tx_result = tx_step.result();
 
-                if !tx_result.eq(&ex_tx_result) {
-                    tracing::warn!(
-                        "Transaction result {tx_idx} on slot {slot} \
-                        is going to be replaced by new one: {:?} -> {:?}",
-                        ex_tx_result,
-                        tx_result,
-                    );
-                    *ex_tx_result = tx_result;
-                }
+                match tx_step {
+                    ParsedTxStep::SmallTx { tx, .. } => {
+                        self.transactions_by_hash
+                            .entry(tx_hash)
+                            .or_insert_with(|| EvmTx::new_small_tx(tx));
+                    }
+
+                    ParsedTxStep::BigTx { .. } => {
+                        self.transactions_by_hash
+                            .entry(tx_hash)
+                            .or_insert_with(EvmTx::new_big_tx);
+                    }
+
+                    ParsedTxStep::TransmitTx { offset, data, .. } => {
+                        self.transactions_by_hash
+                            .entry(tx_hash)
+                            .or_insert_with(EvmTx::new_big_tx)
+                            .update_tx_holder(offset, &data)?;
+                    }
+                };
+
+                // Add new tx results which were not found previously
+                self.results_by_slot
+                    .entry(slot_number)
+                    .or_default()
+                    .entry(tx_hash)
+                    .or_default()
+                    .entry(tx_idx)
+                    .or_insert(tx_result);
             }
         }
 
         Ok(())
     }
 
-    pub fn register_small_tx(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        tx: Transaction,
-        tx_result: Option<TxResult>,
-    ) -> ProgramResult<()> {
-        self.update_or_create_transaction(
-            tx.hash,
-            slot_number,
-            tx_idx,
-            tx_result,
-            || EvmTx::new_small_tx(tx),
-            |_| Ok(()),
-        )
-    }
-
-    pub fn register_big_tx(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        tx_hash: TxHash,
-        tx_result: Option<TxResult>,
-    ) -> ProgramResult<()> {
-        self.update_or_create_transaction(
-            tx_hash,
-            slot_number,
-            tx_idx,
-            tx_result,
-            EvmTx::new_big_tx,
-            |_| Ok(()),
-        )
-    }
-
-    pub fn register_transmit_tx(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        tx_hash: TxHash,
-        offset: usize,
-        data: Vec<u8>,
-    ) -> ProgramResult<()> {
-        self.update_or_create_transaction(
-            tx_hash,
-            slot_number,
-            tx_idx,
-            None,
-            EvmTx::new_big_tx,
-            |tx| tx.update_tx_holder(offset, &data),
-        )
-    }
-
     pub fn is_slot_complete(&self, slot_number: Slot) -> bool {
-        if let Some(slot_txs) = self.transactions_by_slot.get(&slot_number) {
-            for (tx_hash, tx_result) in slot_txs.values() {
-                if tx_result.is_some() {
-                    if let Some(tx) = self.transactions_by_hash.get(tx_hash) {
-                        if !tx.is_data_complete() {
-                            return false;
+        if let Some(slot_results) = self.results_by_slot.get(&slot_number) {
+            for (tx_hash, tx_results) in slot_results {
+                let mut slot_complete = true;
+                for tx_result in tx_results.values() {
+                    if tx_result.is_some() {
+                        if let Some(tx) = self.transactions_by_hash.get(tx_hash) {
+                            slot_complete &= tx.is_data_complete();
+                        } else {
+                            panic!("Transaction {:?} is referenced from slot {:?} but not found in TxParser", tx_hash, slot_number);
                         }
-                    } else {
-                        panic!("Transaction {:?} is referenced from slot {:?} but not found in TxParser", tx_hash, slot_number);
                     }
+                }
+
+                if !slot_complete {
+                    return false;
                 }
             }
         }
@@ -250,43 +258,51 @@ impl TxParser {
     }
 
     pub fn finalize_slot(&self, slot_number: Slot) -> ProgramResult<Vec<(Transaction, TxResult)>> {
-        let mut results = Vec::new();
-        if let Some(slot_txs) = self.transactions_by_slot.get(&slot_number) {
-            for (tx_hash, tx_result) in slot_txs.values() {
-                if let Some(tx_result) = tx_result {
-                    if let Some(tx) = self.transactions_by_hash.get(tx_hash) {
-                        if tx.is_data_complete() {
-                            results.push((tx.build()?, tx_result.clone()));
+        let mut results = BTreeMap::new();
+        if let Some(slot_txs) = self.results_by_slot.get(&slot_number) {
+            for (tx_hash, tx_results) in slot_txs {
+                for (tx_idx, tx_result) in tx_results {
+                    if let Some(tx_result) = tx_result {
+                        if let Some(tx) = self.transactions_by_hash.get(tx_hash) {
+                            if tx.is_data_complete() {
+                                results.insert(*tx_idx, (tx.build()?, tx_result.clone()));
+                                break; // stop iterating over results of current tx_hash
+                            } else {
+                                return Err(Custom(format!(
+                                    "Tx {:?} data is not complete ",
+                                    tx_hash
+                                )));
+                            }
                         } else {
-                            return Err(Custom(format!("Tx {:?} data is not complete ", tx_hash)));
+                            return Err(Custom(format!("Tx {:?} not found by hash", tx_hash)));
                         }
-                    } else {
-                        return Err(Custom(format!("Tx {:?} not found by hash", tx_hash)));
                     }
                 }
             }
         }
 
-        Ok(results)
+        Ok(results.into_values().collect())
     }
 
     pub fn retain_from_slot(&mut self, from_slot: Slot) {
-        for (_, txs) in self.transactions_by_slot.range(..from_slot) {
-            for (tx_hash, _) in txs.values() {
+        for (_, txs) in self.results_by_slot.range(..from_slot) {
+            for tx_hash in txs.keys() {
                 self.transactions_by_hash.remove(tx_hash);
             }
         }
 
-        self.transactions_by_slot
-            .retain(|slot, _| *slot >= from_slot);
+        self.results_by_slot.retain(|slot, _| *slot >= from_slot);
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::indexer::parsers::tx_parser::TxParser;
+    use crate::indexer::parsers::block_parser::GasReport;
+    use crate::indexer::parsers::log_parser::ExitReason;
+    use crate::indexer::parsers::tx_parser::{ParsedTxStep, ParsedTxs, TxParser};
     use crate::indexer::test::{create_big_tx, create_simple_tx, create_wallet};
-    use ethers::types::{Address, U64};
+    use crate::indexer::TxResult;
+    use ethers::types::{Address, U256, U64};
     use solana_program::clock::Slot;
     use tokio;
 
@@ -301,8 +317,19 @@ mod test {
 
         let (tx, tx_result) =
             create_simple_tx(Some(U64::from(CHAIN_ID)), &wallet, Some(gas_recipient)).await;
+
+        let mut slot_txs = ParsedTxs::new();
+        slot_txs
+            .entry(tx.hash)
+            .or_default()
+            .entry(0)
+            .or_insert(ParsedTxStep::SmallTx {
+                tx: tx.clone(),
+                tx_result: Some(tx_result.clone()),
+            });
+
         tx_parser
-            .register_small_tx(slot_number, 0, tx.clone(), Some(tx_result.clone()))
+            .register_slot_transactions(slot_number, slot_txs)
             .unwrap();
 
         assert!(tx_parser.is_slot_complete(slot_number));
@@ -320,6 +347,7 @@ mod test {
         let (tx, tx_result) =
             create_simple_tx(Some(U64::from(CHAIN_ID)), &wallet, Some(gas_recipient)).await;
 
+        let mut slot_txs = ParsedTxs::new();
         // 10 execute iterations
         for i in 0..10 {
             // Only 4-th iteration has a result
@@ -329,10 +357,19 @@ mod test {
                 None
             };
 
-            tx_parser
-                .register_small_tx(slot_number, i, tx.clone(), tx_result)
-                .unwrap();
+            slot_txs
+                .entry(tx.hash)
+                .or_default()
+                .entry(i)
+                .or_insert(ParsedTxStep::SmallTx {
+                    tx: tx.clone(),
+                    tx_result,
+                });
         }
+
+        tx_parser
+            .register_slot_transactions(slot_number, slot_txs)
+            .unwrap();
 
         // Finalization should present in execute slot
         assert!(tx_parser.is_slot_complete(slot_number));
@@ -342,7 +379,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_failed_to_register_block_in_different_slot() {
+    async fn test_replace_transaction_result() {
         let wallet = create_wallet();
         let gas_recipient = Address::random();
         let mut tx_parser = TxParser::new();
@@ -350,32 +387,48 @@ mod test {
 
         let (tx, tx_result) =
             create_simple_tx(Some(U64::from(CHAIN_ID)), &wallet, Some(gas_recipient)).await;
+
+        let mut slot_txs = ParsedTxs::new();
+        slot_txs
+            .entry(tx.hash)
+            .or_default()
+            .entry(0)
+            .or_insert(ParsedTxStep::SmallTx {
+                tx: tx.clone(),
+                tx_result: Some(tx_result),
+            });
         tx_parser
-            .register_small_tx(slot_number, 0, tx.clone(), Some(tx_result.clone()))
+            .register_slot_transactions(slot_number, slot_txs.clone())
             .unwrap();
 
-        assert!(tx_parser.is_slot_complete(slot_number));
-        let chain_txs = tx_parser.finalize_slot(slot_number).unwrap();
-        assert_eq!(chain_txs.len(), 1);
-        assert!(chain_txs[0].eq(&(tx, tx_result)));
-    }
+        let mut slot_txs = ParsedTxs::new();
+        let tx_result = TxResult {
+            exit_reason: ExitReason {
+                code: 0,
+                reason: "Failure".to_string(),
+                return_value: vec![],
+            },
+            logs: vec![],
+            gas_report: GasReport {
+                gas_value: U256::from(22000),
+                gas_recipient: None,
+            },
+        };
 
-    #[tokio::test]
-    async fn test_failed_register_same_txid_in_slot() {
-        let wallet = create_wallet();
-        let gas_recipient = Address::random();
-        let mut tx_parser = TxParser::new();
-        let slot_number: Slot = 13;
+        slot_txs
+            .entry(tx.hash)
+            .or_default()
+            .entry(0)
+            .or_insert(ParsedTxStep::SmallTx {
+                tx: tx.clone(),
+                tx_result: Some(tx_result.clone()),
+            });
 
-        let (tx, tx_result) =
-            create_simple_tx(Some(U64::from(CHAIN_ID)), &wallet, Some(gas_recipient)).await;
         tx_parser
-            .register_small_tx(slot_number, 0, tx.clone(), Some(tx_result.clone()))
+            .register_slot_transactions(slot_number, slot_txs.clone())
             .unwrap();
-
-        assert!(tx_parser
-            .register_small_tx(slot_number, 0, tx.clone(), Some(tx_result))
-            .is_err());
+        let finalized_txs = tx_parser.finalize_slot(slot_number).unwrap();
+        assert!(finalized_txs[0].1.eq(&tx_result));
     }
 
     #[tokio::test]
@@ -394,19 +447,41 @@ mod test {
         const CHUNK_SIZE: usize = 32;
         let mut offset: usize = 0;
 
+        let mut transmit_slot_txs = ParsedTxs::new();
+
         // Fill transaction data
         while !rlp.is_empty() {
             let rest = rlp.split_off(std::cmp::min(CHUNK_SIZE, rlp.len()));
-            tx_parser
-                .register_transmit_tx(transmit_slot_number, offset, tx_hash, offset, rlp.clone())
-                .unwrap();
+            transmit_slot_txs
+                .entry(tx_hash)
+                .or_default()
+                .entry(offset)
+                .or_insert(ParsedTxStep::TransmitTx {
+                    offset,
+                    data: rlp.clone(),
+                });
+
             offset += rlp.len();
             rlp = rest;
         }
 
+        // register transmit transactions
+        tx_parser
+            .register_slot_transactions(transmit_slot_number, transmit_slot_txs)
+            .unwrap();
+
+        let mut execute_slot_txs = ParsedTxs::new();
+        execute_slot_txs
+            .entry(tx_hash)
+            .or_default()
+            .entry(0)
+            .or_insert(ParsedTxStep::BigTx {
+                tx_result: Some(tx_result.clone()),
+            });
+
         // Register execute from holder
         tx_parser
-            .register_big_tx(execute_slot_number, 0, tx_hash, Some(tx_result.clone()))
+            .register_slot_transactions(execute_slot_number, execute_slot_txs)
             .unwrap();
 
         // Finalization should absent in transmit slot
@@ -438,19 +513,19 @@ mod test {
         const CHUNK_SIZE: usize = 32;
         let mut offset: usize = 0;
 
+        let mut transmit_slot_txs = ParsedTxs::new();
         while !rlp.is_empty() {
             let rest = rlp.split_off(std::cmp::min(CHUNK_SIZE, rlp.len()));
             if offset > 0 {
                 // Skip first piece of data
-                tx_parser
-                    .register_transmit_tx(
-                        transmit_slot_number,
+                transmit_slot_txs
+                    .entry(tx_hash)
+                    .or_default()
+                    .entry(offset)
+                    .or_insert(ParsedTxStep::TransmitTx {
                         offset,
-                        tx_hash,
-                        offset,
-                        rlp.clone(),
-                    )
-                    .unwrap();
+                        data: rlp.clone(),
+                    });
             }
 
             offset += rlp.len();
@@ -458,7 +533,18 @@ mod test {
         }
 
         tx_parser
-            .register_big_tx(execute_slot_number, 0, tx_hash, Some(tx_result.clone()))
+            .register_slot_transactions(transmit_slot_number, transmit_slot_txs)
+            .unwrap();
+        let mut execute_slot_txs = ParsedTxs::new();
+        execute_slot_txs
+            .entry(tx_hash)
+            .or_default()
+            .entry(0)
+            .or_insert(ParsedTxStep::BigTx {
+                tx_result: Some(tx_result.clone()),
+            });
+        tx_parser
+            .register_slot_transactions(execute_slot_number, execute_slot_txs)
             .unwrap();
 
         // Finalization should absent in transmit slot
@@ -486,29 +572,47 @@ mod test {
         const CHUNK_SIZE: usize = 32;
         let mut offset: usize = 0;
 
+        let mut transmit_slot_txs = ParsedTxs::new();
         // Fill transaction data
         while !rlp.is_empty() {
             let rest = rlp.split_off(std::cmp::min(CHUNK_SIZE, rlp.len()));
-            tx_parser
-                .register_transmit_tx(transmit_slot_number, offset, tx_hash, offset, rlp.clone())
-                .unwrap();
+            transmit_slot_txs
+                .entry(tx_hash)
+                .or_default()
+                .entry(offset)
+                .or_insert(ParsedTxStep::TransmitTx {
+                    offset,
+                    data: rlp.clone(),
+                });
+
             offset += rlp.len();
             rlp = rest;
         }
 
+        tx_parser
+            .register_slot_transactions(transmit_slot_number, transmit_slot_txs)
+            .unwrap();
+
+        let mut execute_slot_txs = ParsedTxs::new();
         // 10 execute iterations
-        for i in 0..10 {
+        for tx_idx in 0..10 {
             // Only 4-th iteration has a result
-            let tx_result = if i == 4 {
+            let tx_result = if tx_idx == 4 {
                 Some(tx_result.clone())
             } else {
                 None
             };
 
-            tx_parser
-                .register_big_tx(execute_slot_number, i, tx_hash, tx_result)
-                .unwrap();
+            execute_slot_txs
+                .entry(tx_hash)
+                .or_default()
+                .entry(tx_idx)
+                .or_insert(ParsedTxStep::BigTx { tx_result });
         }
+
+        tx_parser
+            .register_slot_transactions(execute_slot_number, execute_slot_txs)
+            .unwrap();
 
         // Finalization should absent in transmit slot
         assert!(tx_parser.is_slot_complete(transmit_slot_number));
@@ -523,7 +627,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_failed_to_register_two_results_in_one_block() {
+    async fn test_replace_result_and_tx_idx() {
         let wallet = create_wallet();
         let gas_recipient = Address::random();
         let mut tx_parser = TxParser::new();
@@ -531,12 +635,47 @@ mod test {
         let (tx, tx_result) =
             create_simple_tx(Some(U64::from(CHAIN_ID)), &wallet, Some(gas_recipient)).await;
 
+        let mut slot_txs = ParsedTxs::new();
+        slot_txs
+            .entry(tx.hash)
+            .or_default()
+            .entry(0)
+            .or_insert(ParsedTxStep::SmallTx {
+                tx: tx.clone(),
+                tx_result: Some(tx_result.clone()),
+            });
+
         tx_parser
-            .register_small_tx(slot_number, 0, tx.clone(), Some(tx_result.clone()))
+            .register_slot_transactions(slot_number, slot_txs)
             .unwrap();
 
-        assert!(tx_parser
-            .register_small_tx(slot_number, 1, tx.clone(), Some(tx_result),)
-            .is_err());
+        let mut slot_txs = ParsedTxs::new();
+        let new_tx_result = TxResult {
+            exit_reason: ExitReason {
+                code: 0,
+                reason: "Failure".to_string(),
+                return_value: vec![],
+            },
+            logs: vec![],
+            gas_report: GasReport {
+                gas_value: U256::from(22000),
+                gas_recipient: None,
+            },
+        };
+
+        slot_txs
+            .entry(tx.hash)
+            .or_default()
+            .entry(1)
+            .or_insert(ParsedTxStep::SmallTx {
+                tx: tx.clone(),
+                tx_result: Some(new_tx_result.clone()),
+            });
+
+        tx_parser
+            .register_slot_transactions(slot_number, slot_txs.clone())
+            .unwrap();
+        let finalized_txs = tx_parser.finalize_slot(slot_number).unwrap();
+        assert!(finalized_txs[0].1.eq(&new_tx_result));
     }
 }

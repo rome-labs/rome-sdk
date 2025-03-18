@@ -1,5 +1,7 @@
 use crate::error::RomeEvmError::Custom;
-use crate::indexer::ethereum_block_storage::{EthBlockId, PendingBlock, ReproduceBlocks};
+use crate::indexer::ethereum_block_storage::{
+    EthBlockId, PendingBlock, ProducerParams, ReproduceParams,
+};
 use crate::indexer::parsers::block_parser::EthBlock;
 use crate::indexer::{inmemory::TransactionStorage, BlockParams, PendingBlocks, ProducedBlocks};
 use async_trait::async_trait;
@@ -148,11 +150,8 @@ impl EthereumBlockStorage {
             .and_then(|block| block.eth_blocks.get(*eth_block_idx))
             .cloned()
     }
-}
 
-#[async_trait]
-impl indexer::EthereumBlockStorage for EthereumBlockStorage {
-    async fn get_pending_blocks(&self) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>> {
+    async fn get_pending_blocks(&self) -> ProgramResult<Option<ProducerParams>> {
         let lock = self.blocks_by_sol_slot.read().await;
 
         // Find a not-advanced chain of blocks which is higher than advanced one
@@ -173,7 +172,7 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
             // Build chain of solana blocks to advance state
             let mut current_slot = max_not_advanced;
             let mut pending_blocks = PendingBlocks::default();
-            let parent_blockhash = loop {
+            let parent_hash = loop {
                 if let Some(solana_block) = lock.get(&current_slot) {
                     if let Some(parent_blockhash) = solana_block
                         .get_pending_blocks(&mut pending_blocks, &self.transaction_storage)
@@ -191,7 +190,11 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
             };
 
             if !pending_blocks.is_empty() {
-                Ok(Some((parent_blockhash, pending_blocks)))
+                Ok(Some(ProducerParams {
+                    parent_hash,
+                    finalized_block: None,
+                    pending_blocks,
+                }))
             } else {
                 Ok(None)
             }
@@ -199,19 +202,22 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
             Ok(None)
         }
     }
+}
 
+#[async_trait]
+impl indexer::EthereumBlockStorage for EthereumBlockStorage {
     async fn reproduce_blocks(
         &self,
         _from_slot: Slot,
         _to_slot: Slot,
-    ) -> ProgramResult<Option<(Option<TxHash>, ReproduceBlocks)>> {
+    ) -> ProgramResult<Option<ReproduceParams>> {
         Ok(None)
     }
 
     async fn register_parse_results(
         &self,
         parse_results: BTreeMap<Slot, BlockParseResult>,
-    ) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>> {
+    ) -> ProgramResult<Option<ProducerParams>> {
         if !parse_results.is_empty() {
             let mut lock = self.blocks_by_sol_slot.write().await;
             for (slot_number, parse_result) in parse_results {
@@ -282,14 +288,14 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
 
     async fn blocks_produced(
         &self,
-        pending_blocks: PendingBlocks,
+        producer_params: &ProducerParams,
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()> {
         let mut by_sol_slot_lock = self.blocks_by_sol_slot.write().await;
         let mut by_number_lock = self.blocks_by_number.write().await;
         let mut by_hash_lock = self.blocks_by_hash.write().await;
 
-        for block_id in pending_blocks.keys() {
+        for block_id in producer_params.pending_blocks.keys() {
             if let Some(block_params) = produced_blocks.get(block_id) {
                 update_block(
                     &mut by_sol_slot_lock,
@@ -304,7 +310,7 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
         }
 
         self.transaction_storage
-            .blocks_produced(pending_blocks, produced_blocks)
+            .blocks_produced(producer_params, produced_blocks)
             .await?;
 
         Ok(())
@@ -369,6 +375,10 @@ impl indexer::EthereumBlockStorage for EthereumBlockStorage {
     async fn get_slot_for_eth_block(&self, block_number: U64) -> ProgramResult<Option<Slot>> {
         let lock = self.blocks_by_number.read().await;
         Ok(lock.get(&block_number).map(|block_id| block_id.0))
+    }
+
+    async fn clean_from_slot(&self, _from_slot: Slot) -> ProgramResult<()> {
+        todo!()
     }
 }
 
@@ -488,15 +498,16 @@ mod test {
         let mut parse_results = BTreeMap::new();
         parse_results.insert(slot10_result_builder.slot(), slot10_result_builder.build());
 
-        let (parent_hash, mut pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results)
             .await
             .unwrap()
             .unwrap();
 
-        assert!(parent_hash.is_none());
-        assert_eq!(pending_blocks.len(), 1);
-        pending_blocks = slot10_result_builder.check_pending_blocks(pending_blocks);
+        assert!(producer_params.parent_hash.is_none());
+        assert_eq!(producer_params.pending_blocks.len(), 1);
+        let pending_blocks =
+            slot10_result_builder.check_pending_blocks(producer_params.pending_blocks);
         assert!(pending_blocks.is_empty());
     }
 
@@ -542,15 +553,16 @@ mod test {
         let mut parse_results = BTreeMap::new();
         parse_results.insert(slot10_result_builder.slot(), slot10_result_builder.build());
 
-        let (parent_hash, mut pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results)
             .await
             .unwrap()
             .unwrap();
 
-        assert!(parent_hash.is_none());
-        assert_eq!(pending_blocks.len(), 7);
-        pending_blocks = slot10_result_builder.check_pending_blocks(pending_blocks);
+        assert!(producer_params.parent_hash.is_none());
+        assert_eq!(producer_params.pending_blocks.len(), 7);
+        let pending_blocks =
+            slot10_result_builder.check_pending_blocks(producer_params.pending_blocks);
         assert!(pending_blocks.is_empty());
     }
 
@@ -599,15 +611,16 @@ mod test {
         parse_results.insert(slot10_result_builder.slot(), slot10_result_builder.build());
         parse_results.insert(slot12_result_builder.slot(), slot12_result_builder.build());
 
-        let (parent_hash, mut pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results)
             .await
             .unwrap()
             .unwrap();
 
-        assert!(parent_hash.is_none());
-        assert_eq!(pending_blocks.len(), 7);
-        pending_blocks = slot10_result_builder.check_pending_blocks(pending_blocks);
+        assert!(producer_params.parent_hash.is_none());
+        assert_eq!(producer_params.pending_blocks.len(), 7);
+        let mut pending_blocks =
+            slot10_result_builder.check_pending_blocks(producer_params.pending_blocks);
         assert_eq!(pending_blocks.len(), 4);
         pending_blocks = slot12_result_builder.check_pending_blocks(pending_blocks);
         assert!(pending_blocks.is_empty());
@@ -692,14 +705,15 @@ mod test {
         parse_results.insert(slot14_result_builder.slot(), slot14_result_builder.build());
         parse_results.insert(slot15_result_builder.slot(), slot15_result_builder.build());
 
-        let (parent_hash, mut pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results)
             .await
             .unwrap()
             .unwrap();
 
-        assert!(parent_hash.is_none());
-        pending_blocks = slot10_result_builder.check_pending_blocks(pending_blocks);
+        assert!(producer_params.parent_hash.is_none());
+        let mut pending_blocks =
+            slot10_result_builder.check_pending_blocks(producer_params.pending_blocks);
         pending_blocks = slot12_result_builder.check_pending_blocks(pending_blocks);
         pending_blocks = slot14_result_builder.check_pending_blocks(pending_blocks);
         pending_blocks = slot15_result_builder.check_pending_blocks(pending_blocks);
@@ -748,7 +762,7 @@ mod test {
         parse_results.insert(slot10_result_builder.slot(), slot10_result_builder.build());
         parse_results.insert(slot11_result_builder.slot(), slot11_result_builder.build());
         parse_results.insert(slot12_result_builder.slot(), slot12_result_builder.build());
-        let (_, pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results)
             .await
             .unwrap()
@@ -756,7 +770,7 @@ mod test {
 
         let mut results = BTreeMap::new();
         let mut new_parent_hash = None;
-        for (block_id, _) in &pending_blocks {
+        for (block_id, _) in &producer_params.pending_blocks {
             let blockhash = H256::random();
             results.insert(
                 *block_id,
@@ -773,7 +787,7 @@ mod test {
         // remove one of results
         results.remove(&(12u64, 1));
 
-        let res = storage.blocks_produced(pending_blocks, results).await;
+        let res = storage.blocks_produced(&producer_params, results).await;
 
         assert!(!res.is_err());
     }
@@ -849,16 +863,16 @@ mod test {
         let mut parse_results = BTreeMap::new();
         parse_results.insert(slot10_result_builder.slot(), slot10_result_builder.build());
         parse_results.insert(slot11_result_builder.slot(), slot11_result_builder.build());
-        let (parent_hash, pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results.clone())
             .await
             .unwrap()
             .unwrap();
 
-        assert!(parent_hash.is_none());
+        assert!(producer_params.parent_hash.is_none());
         let mut reg_results = BTreeMap::new();
         let mut new_parent_hash = None;
-        for (block_id, _) in &pending_blocks {
+        for (block_id, _) in &producer_params.pending_blocks {
             let blockhash = H256::random();
             reg_results.insert(
                 *block_id,
@@ -875,7 +889,7 @@ mod test {
 
         let (_, last_result) = reg_results.last_key_value().unwrap();
         storage
-            .blocks_produced(pending_blocks.clone(), reg_results.clone())
+            .blocks_produced(&producer_params, reg_results.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -911,16 +925,16 @@ mod test {
         let mut parse_results = BTreeMap::new();
         parse_results.insert(slot12_result_builder.slot(), slot12_result_builder.build());
         parse_results.insert(slot13_result_builder.slot(), slot13_result_builder.build());
-        let (parent_hash, pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results.clone())
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(parent_hash, Some(last_result.hash));
+        assert_eq!(producer_params.parent_hash, Some(last_result.hash));
         let mut reg_results = BTreeMap::new();
         let mut new_parent_hash = None;
-        for (block_id, _) in &pending_blocks {
+        for (block_id, _) in &producer_params.pending_blocks {
             let blockhash = H256::random();
             reg_results.insert(
                 *block_id,
@@ -935,7 +949,7 @@ mod test {
             new_parent_hash = Some(blockhash);
         }
         storage
-            .blocks_produced(pending_blocks.clone(), reg_results.clone())
+            .blocks_produced(&producer_params, reg_results.clone())
             .await
             .unwrap();
 
@@ -1014,14 +1028,15 @@ mod test {
         parse_results.insert(slot10_result_builder.slot(), slot10_result_builder.build());
         parse_results.insert(slot11_result_builder.slot(), slot11_result_builder.build());
         parse_results.insert(slot12_result_builder.slot(), slot12_result_builder.build());
-        let (parent_hash, mut pending_blocks) = storage
+        let producer_params = storage
             .register_parse_results(parse_results.clone())
             .await
             .unwrap()
             .unwrap();
 
-        assert!(parent_hash.is_none());
-        pending_blocks = slot10_result_builder.check_pending_blocks(pending_blocks);
+        assert!(producer_params.parent_hash.is_none());
+        let mut pending_blocks =
+            slot10_result_builder.check_pending_blocks(producer_params.pending_blocks);
         pending_blocks = slot11_result_builder.check_pending_blocks(pending_blocks);
         pending_blocks = slot12_result_builder.check_pending_blocks(pending_blocks);
         assert!(pending_blocks.is_empty());

@@ -1,23 +1,24 @@
 use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
+use crate::indexer::ethereum_block_storage::{ProducerParams, ReproduceParams};
 use crate::indexer::parsers::tx_parser::TxParser;
 use crate::indexer::{
-    BlockParams, BlockParseResult, BlockParser, BlockProducer, EthereumBlockStorage, PendingBlocks,
+    BlockParams, BlockParseResult, BlockParser, BlockProducer, EthereumBlockStorage,
     ProducedBlocks, SolanaBlockStorage,
 };
-use ethers::types::{H256, U64};
+use ethers::types::U64;
 use solana_sdk::{clock::Slot, pubkey::Pubkey};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio::{sync::RwLock, time::Duration};
 
-const MAX_PARSE_BEHIND: Slot = 32;
+const MAX_PARSE_BEHIND: Slot = 64;
 const BATCH_SIZE: usize = 1024;
 const NUM_RETRIES: usize = 500;
 
-#[derive(Clone)]
 pub struct RollupIndexer<
     S: SolanaBlockStorage + 'static,
     E: EthereumBlockStorage + 'static,
@@ -54,11 +55,18 @@ impl<
         }
     }
 
-    pub async fn start(self, start_slot: Option<Slot>, interval_ms: u64) -> ProgramResult<()> {
-        let interval = Duration::from_millis(interval_ms);
-
-        let start_slot = self.pre_run(start_slot, interval).await?;
-        self.run(start_slot, interval, BATCH_SIZE as Slot).await?
+    pub fn start(
+        self,
+        start_slot: Option<Slot>,
+        interval_ms: u64,
+        reorg_event_rx: UnboundedReceiver<Slot>,
+    ) -> JoinHandle<ProgramResult<()>> {
+        tokio::spawn(async move {
+            let interval = Duration::from_millis(interval_ms);
+            let start_slot = self.pre_run(start_slot, interval).await?;
+            self.run(start_slot, interval, BATCH_SIZE as Slot, reorg_event_rx)
+                .await
+        })
     }
 
     async fn pre_run(&self, start_slot: Option<Slot>, interval: Duration) -> ProgramResult<Slot> {
@@ -85,19 +93,16 @@ impl<
                     last_block_in_storage
                 )));
             }
+        } else if let Some(last_slot_in_producer) = self
+            .ethereum_block_storage
+            .get_slot_for_eth_block(last_block_in_producer)
+            .await?
+        {
+            last_slot_in_producer
         } else {
-            if let Some(last_slot_in_producer) = self
-                .ethereum_block_storage
-                .get_slot_for_eth_block(last_block_in_producer)
-                .await?
-            {
-                last_slot_in_producer
-            } else {
-                start_slot.ok_or(Custom(
-                    "start_slot is not set and there's no produced blocks in BlockProducer"
-                        .to_string(),
-                ))?
-            }
+            start_slot.ok_or(Custom(
+                "start_slot is not set and there's no produced blocks in BlockProducer".to_string(),
+            ))?
         })
     }
 
@@ -156,29 +161,26 @@ impl<
         batch_size: Slot,
     ) -> ProgramResult<Slot> {
         let to_slot = from_slot + std::cmp::min(max_slot - from_slot, batch_size);
-        tracing::info!("Reproducing blocks from_slot {from_slot}, to_slot {to_slot}");
-        if let Some((parent_hash, reproduce_blocks)) = self
+        if let Some(ReproduceParams {
+            producer_params,
+            expected_results,
+        }) = self
             .ethereum_block_storage
             .reproduce_blocks(from_slot, to_slot)
             .await?
         {
-            let pending_blocks = reproduce_blocks
-                .iter()
-                .map(|(block_id, (pending, _))| (*block_id, pending.clone()))
-                .collect();
-
-            let new_produced_blocks = self
+            let production_result = self
                 .block_producer
-                .produce_blocks(parent_hash, &pending_blocks)
+                .produce_blocks(&producer_params, Some(batch_size as usize))
                 .await?;
 
             // Check results of block reproduction
-            for (block_id, (_, old_block_params)) in reproduce_blocks {
-                if let Some(new_block_params) = new_produced_blocks.get(&block_id) {
-                    if &old_block_params != new_block_params {
+            for (block_id, expected_params) in expected_results {
+                if let Some(new_block_params) = production_result.produced_blocks.get(&block_id) {
+                    if &expected_params != new_block_params {
                         return Err(Custom(format!(
                             "Block reproduction failed at {:?}:\n Expected\n {:?} received {:?}",
-                            block_id, old_block_params, new_block_params
+                            block_id, expected_params, new_block_params
                         )));
                     }
                 } else {
@@ -193,50 +195,73 @@ impl<
         Ok(to_slot)
     }
 
-    fn run(
+    async fn run(
         self,
         mut from_slot: Slot,
         interval: Duration,
         batch_size: Slot,
-    ) -> JoinHandle<ProgramResult<()>> {
-        tokio::spawn(async move {
-            loop {
-                from_slot = match self.solana_block_storage.get_last_slot().await {
-                    Ok(Some(to_slot)) if from_slot < to_slot => {
-                        let mut current_slot = from_slot;
-                        while current_slot < to_slot {
-                            let (new_current_slot, parse_results) = self
-                                .parse_blocks_batch(current_slot, to_slot, batch_size)
-                                .await?;
+        mut reorg_event_rx: UnboundedReceiver<Slot>,
+    ) -> ProgramResult<()> {
+        tracing::info!("Starting RollupIndexer from slot {from_slot}");
+        loop {
+            from_slot = tokio::select! {
+                // Either continue parsing from latest slot of previous iteration
+                res = self.restore_or_produce_until_in_sync(from_slot, interval, batch_size) => { res }
 
-                            if let Some((parent_hash, pending_blocks)) = self
-                                .ethereum_block_storage
-                                .register_parse_results(parse_results)
-                                .await?
-                            {
-                                self.restore_or_produce_blocks(
-                                    parent_hash,
-                                    pending_blocks,
-                                    interval,
-                                )
-                                .await?;
-                            }
+                // Or re-parse blocks after reorg happened
+                res = reorg_event_rx.recv() => {
+                    if let Some(res) = res {
+                        self.ethereum_block_storage.clean_from_slot(res).await?;
+                        Ok(res)
+                    } else {
+                        tracing::info!("Reorg event channel closed, exiting RollupIndexer");
+                        break Ok(());
+                    }
+                }
+            }?;
+        }
+    }
 
-                            self.retain_storages(current_slot).await;
-                            current_slot = new_current_slot;
-                        }
-                        to_slot
+    async fn restore_or_produce_until_in_sync(
+        &self,
+        from_slot: Slot,
+        interval: Duration,
+        batch_size: Slot,
+    ) -> ProgramResult<Slot> {
+        Ok(match self.solana_block_storage.get_last_slot().await {
+            Ok(Some(to_slot)) if from_slot < to_slot => {
+                let mut current_slot = from_slot;
+                while current_slot < to_slot {
+                    let (new_current_slot, parse_results) = self
+                        .parse_blocks_batch(current_slot, to_slot, batch_size)
+                        .await?;
+
+                    if let Some(production_params) = self
+                        .ethereum_block_storage
+                        .register_parse_results(parse_results)
+                        .await?
+                    {
+                        self.restore_or_produce_blocks(
+                            production_params,
+                            interval,
+                            batch_size as usize,
+                        )
+                        .await?;
                     }
-                    Ok(_) => {
-                        tokio::time::sleep(interval).await;
-                        from_slot
-                    }
-                    Err(err) => {
-                        tracing::warn!("Unable to get latest slot from slot storage: {:?}", err);
-                        tokio::time::sleep(interval).await;
-                        from_slot
-                    }
-                };
+
+                    self.retain_storages(current_slot).await;
+                    current_slot = new_current_slot;
+                }
+                to_slot
+            }
+            Ok(_) => {
+                tokio::time::sleep(interval).await;
+                from_slot
+            }
+            Err(err) => {
+                tracing::warn!("Unable to get latest slot from slot storage: {:?}", err);
+                tokio::time::sleep(interval).await;
+                from_slot
             }
         })
     }
@@ -293,9 +318,9 @@ impl<
 
     async fn restore_or_produce_blocks(
         &self,
-        parent_hash: Option<H256>,
-        pending_blocks: PendingBlocks,
+        mut producer_params: ProducerParams,
         interval: Duration,
+        batch_size: usize,
     ) -> ProgramResult<()> {
         let last_block_in_storage = self
             .ethereum_block_storage
@@ -308,21 +333,35 @@ impl<
             self.restore_blocks(
                 last_block_in_storage + 1,
                 last_block_in_producer,
-                parent_hash,
-                pending_blocks,
+                producer_params,
                 NUM_RETRIES,
                 interval,
             )
             .await?;
         } else {
-            let produced_blocks = self
-                .block_producer
-                .produce_blocks(parent_hash, &pending_blocks)
-                .await?;
+            loop {
+                let production_result = self
+                    .block_producer
+                    .produce_blocks(&producer_params, Some(batch_size))
+                    .await?;
 
-            self.ethereum_block_storage
-                .blocks_produced(pending_blocks, produced_blocks)
-                .await?;
+                if let Some((last_prod_block_id, last_prod_block_hash)) = production_result
+                    .produced_blocks
+                    .last_key_value()
+                    .map(|(last_prod_block_id, params)| (*last_prod_block_id, params.hash))
+                {
+                    self.ethereum_block_storage
+                        .blocks_produced(&producer_params, production_result.produced_blocks)
+                        .await?;
+
+                    producer_params.parent_hash = Some(last_prod_block_hash);
+                    producer_params
+                        .pending_blocks
+                        .retain(|block_id, _| block_id.gt(&last_prod_block_id));
+                } else {
+                    break;
+                }
+            }
         }
 
         Ok(())
@@ -332,17 +371,17 @@ impl<
         &self,
         from_block: U64,
         to_block: U64,
-        mut parent_hash: Option<H256>,
-        pending_blocks: PendingBlocks,
+        producer_params: ProducerParams,
         num_retries: usize,
         interval: Duration,
     ) -> ProgramResult<()> {
+        let mut parent_hash = producer_params.parent_hash;
         let mut blocks_params = self
             .get_blocks_params(from_block, to_block, num_retries, interval)
             .await?;
 
         let mut produced_blocks = ProducedBlocks::new();
-        for (block_id, _) in &pending_blocks {
+        for block_id in producer_params.pending_blocks.keys() {
             if let Some((_, block_params)) = blocks_params.pop_first() {
                 if parent_hash != block_params.parent_hash {
                     return Err(Custom(format!(
@@ -359,7 +398,7 @@ impl<
         }
 
         self.ethereum_block_storage
-            .blocks_produced(pending_blocks, produced_blocks)
+            .blocks_produced(&producer_params, produced_blocks)
             .await?;
 
         Ok(())

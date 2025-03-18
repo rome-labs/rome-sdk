@@ -18,6 +18,12 @@ use std::collections::BTreeMap;
 // Consists of Solana slot number and index of the Eth block within this slot
 pub type EthBlockId = (Slot, usize);
 
+#[derive(Debug, Clone)]
+pub enum FinalizedBlock {
+    Produced(H256),
+    Pending(EthBlockId),
+}
+
 #[derive(Clone, Default)]
 pub struct PendingBlock {
     pub transactions: BTreeMap<usize, (Transaction, TxResult)>,
@@ -35,7 +41,11 @@ pub struct BlockParams {
 
 pub type PendingBlocks = BTreeMap<EthBlockId, PendingBlock>;
 pub type ProducedBlocks = BTreeMap<EthBlockId, BlockParams>;
-pub type ReproduceBlocks = BTreeMap<EthBlockId, (PendingBlock, BlockParams)>;
+
+pub struct ProductionResult {
+    pub produced_blocks: ProducedBlocks,
+    pub finalized_block: H256,
+}
 
 #[async_trait]
 pub trait BlockProducer: Send + Sync {
@@ -46,9 +56,9 @@ pub trait BlockProducer: Send + Sync {
     // Builds chain from pending_blocks on top of block with given parent_hash in a given order
     async fn produce_blocks(
         &self,
-        parent_hash: Option<H256>,
-        pending_blocks: &PendingBlocks,
-    ) -> ProgramResult<ProducedBlocks>;
+        producer_params: &ProducerParams,
+        limit: Option<usize>,
+    ) -> ProgramResult<ProductionResult>;
 }
 
 const SHA3_UNCLES: [u8; 32] = [
@@ -127,20 +137,29 @@ impl BlockType {
     }
 }
 
+pub struct ProducerParams {
+    pub parent_hash: Option<H256>,
+    pub finalized_block: Option<FinalizedBlock>,
+    pub pending_blocks: PendingBlocks,
+}
+
+pub struct ReproduceParams {
+    pub producer_params: ProducerParams,
+    pub expected_results: BTreeMap<EthBlockId, BlockParams>,
+}
+
 #[async_trait]
 pub trait EthereumBlockStorage: Send + Sync {
-    async fn get_pending_blocks(&self) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>>;
-
     async fn reproduce_blocks(
         &self,
         from_slot: Slot,
         to_slot: Slot,
-    ) -> ProgramResult<Option<(Option<H256>, ReproduceBlocks)>>;
+    ) -> ProgramResult<Option<ReproduceParams>>;
 
     async fn register_parse_results(
         &self,
         parse_results: BTreeMap<Slot, BlockParseResult>,
-    ) -> ProgramResult<Option<(Option<H256>, PendingBlocks)>>;
+    ) -> ProgramResult<Option<ProducerParams>>;
 
     async fn latest_block(&self) -> ProgramResult<Option<U64>>;
 
@@ -154,7 +173,7 @@ pub trait EthereumBlockStorage: Send + Sync {
 
     async fn blocks_produced(
         &self,
-        pending_blocks: PendingBlocks,
+        producer_params: &ProducerParams,
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()>;
 
@@ -174,6 +193,8 @@ pub trait EthereumBlockStorage: Send + Sync {
     async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<Transaction>>;
 
     async fn get_slot_for_eth_block(&self, block_number: U64) -> ProgramResult<Option<Slot>>;
+
+    async fn clean_from_slot(&self, from_slot: Slot) -> ProgramResult<()>;
 }
 
 #[derive(Clone, Serialize, Deserialize)]

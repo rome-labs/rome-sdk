@@ -2,7 +2,7 @@ use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
 use crate::indexer::{
     self, ethereum_block_storage::ReceiptParams, parsers::block_parser::TxResult, BlockParams,
-    BlockParseResult, PendingBlocks, ProducedBlocks,
+    BlockParseResult, ProducedBlocks, ProducerParams,
 };
 use ethers::types::{Bloom, Log, OtherFields, Transaction, TransactionReceipt, TxHash, U256, U64};
 use solana_program::clock::Slot;
@@ -312,12 +312,12 @@ impl TransactionStorage {
 
     pub async fn blocks_produced(
         &self,
-        pending_blocks: PendingBlocks,
+        producer_params: &ProducerParams,
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()> {
         let mut lock = self.transactions.write().await;
-        for (block_id, pending_block) in pending_blocks {
-            if let Some(block_params) = produced_blocks.get(&block_id) {
+        for (block_id, pending_block) in &producer_params.pending_blocks {
+            if let Some(block_params) = produced_blocks.get(block_id) {
                 lock.block_produced(
                     block_id.0,
                     block_params,
@@ -348,7 +348,7 @@ mod test {
     use crate::indexer::{
         inmemory::TransactionStorage,
         test::{create_simple_tx, create_wallet},
-        BlockParams, BlockParseResult, PendingBlock,
+        BlockParams, BlockParseResult, PendingBlock, ProducerParams,
     };
     use ethers::prelude::H256;
     use ethers::types::{Address, Transaction, U256, U64};
@@ -377,14 +377,18 @@ mod test {
         let block_number = U64::from(random::<u64>());
         storage
             .blocks_produced(
-                BTreeMap::from([(
-                    block_id.clone(),
-                    PendingBlock {
-                        transactions: BTreeMap::from([(0, (tx.clone(), tx_result))]),
-                        gas_recipient,
-                        slot_timestamp: Some(0),
-                    },
-                )]),
+                &ProducerParams {
+                    pending_blocks: BTreeMap::from([(
+                        block_id.clone(),
+                        PendingBlock {
+                            transactions: BTreeMap::from([(0, (tx.clone(), tx_result))]),
+                            gas_recipient,
+                            slot_timestamp: Some(0),
+                        },
+                    )]),
+                    parent_hash: None,
+                    finalized_block: None,
+                },
                 BTreeMap::from([(
                     block_id.clone(),
                     BlockParams {
@@ -461,14 +465,18 @@ mod test {
         let block_number = U64::from(random::<u64>());
         assert!(storage
             .blocks_produced(
-                BTreeMap::from([(
-                    block_id.clone(),
-                    PendingBlock {
-                        transactions: BTreeMap::from([(0, (tx.clone(), tx_result))]),
-                        gas_recipient: Some(gas_recipient),
-                        slot_timestamp: Some(0),
-                    },
-                )]),
+                &ProducerParams {
+                    pending_blocks: BTreeMap::from([(
+                        block_id.clone(),
+                        PendingBlock {
+                            transactions: BTreeMap::from([(0, (tx.clone(), tx_result))]),
+                            gas_recipient: Some(gas_recipient),
+                            slot_timestamp: Some(0),
+                        },
+                    )]),
+                    parent_hash: None,
+                    finalized_block: None,
+                },
                 BTreeMap::from([(
                     block_id.clone(),
                     BlockParams {

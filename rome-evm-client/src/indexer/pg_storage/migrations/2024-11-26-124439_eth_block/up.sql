@@ -170,7 +170,7 @@ $$ LANGUAGE plpgsql;
 ------------------------------------------------------------------------------------------------------------------------
 
 -- Returns set of already produced Ethereum blocks
--- between from_slot and to_slot Solana slots, including to_slot
+-- between from_slot and to_slot Solana slots, including from_slot
 CREATE OR REPLACE FUNCTION reproduce_blocks(from_slot BIGINT, to_slot BIGINT)
     RETURNS TABLE (
         slot_number BIGINT,

@@ -111,13 +111,17 @@ impl GethEngine {
 
     pub async fn advance_rollup_state(
         &self,
+        finalized_blockhash: H256,
         parent_hash: H256,
         timestamp: U256,
         pending_block: &PendingBlock,
+        finalize_new_block: bool,
     ) -> anyhow::Result<BlockParams> {
         //
         // ------------------- Do fork choice update 1 -------------------
         //
+
+        let finalized_blockhash = format!("0x{:x}", finalized_blockhash);
 
         let gas_prices: Vec<u64> = pending_block
             .transactions
@@ -156,12 +160,12 @@ impl GethEngine {
             gas_used: gas_used.clone(),
         };
 
-        let blockhash = serde_json::Value::from(format!("0x{:x}", parent_hash));
+        let blockhash = format!("0x{:x}", parent_hash);
         let forkchoice_request = vec![
             json!({
                 "headBlockHash": blockhash,
                 "safeBlockHash": blockhash,
-                "finalizedBlockHash": blockhash,
+                "finalizedBlockHash": finalized_blockhash,
             }),
             to_value(forkchoice_params).unwrap(),
         ];
@@ -204,11 +208,17 @@ impl GethEngine {
         // ------------------- Do fork choice update 2 -------------------
         //
 
+        let new_finalized_blockhash = if finalize_new_block {
+            new_blockhash.clone()
+        } else {
+            finalized_blockhash
+        };
+
         let forkchoice_request = vec![
             json!({
                 "headBlockHash": new_blockhash,
                 "safeBlockHash": new_blockhash,
-                "finalizedBlockHash": new_blockhash,
+                "finalizedBlockHash": new_finalized_blockhash,
             }),
             json!(null),
         ];

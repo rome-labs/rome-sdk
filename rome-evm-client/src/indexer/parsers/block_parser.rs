@@ -1,7 +1,9 @@
 use crate::indexer::ethereum_block_storage::EthBlockId;
 use crate::indexer::parsers::log_parser;
 use crate::indexer::parsers::log_parser::LogParser;
-use crate::indexer::parsers::tx_parser::{decode_transaction_from_rlp, TxParser};
+use crate::indexer::parsers::tx_parser::{
+    decode_transaction_from_rlp, ParsedTxStep, ParsedTxs, TxParser,
+};
 use crate::indexer::{BlockParams, BlockType};
 use ethers::addressbook::Address;
 use ethers::prelude::{Block, Log, H256};
@@ -54,6 +56,10 @@ where
             })
             .for_each(|(tx_idx, transaction, meta)| {
                 if let (Some(transaction), Some(meta)) = (transaction, meta) {
+                    if meta.err.is_some() {
+                        return;
+                    }
+
                     let accounts = transaction.message.static_account_keys();
                     transaction
                         .message
@@ -209,6 +215,213 @@ impl BlockParseResult {
     }
 }
 
+struct SolanaBlockParser<'a> {
+    chain_id: u64,
+    parsed_txs: ParsedTxs,
+    tx_parser: &'a mut TxParser,
+    slot_number: Slot,
+}
+
+fn parse_transaction_meta(meta: &UiTransactionStatusMeta) -> ProgramResult<Option<TxResult>> {
+    Ok(match &meta.log_messages {
+        OptionSerializer::Some(logs) => {
+            let mut parser = LogParser::new();
+            parser.parse(logs)?;
+            if let Some(exit_reason) = parser.exit_reason {
+                Some(TxResult {
+                    exit_reason,
+                    logs: parser.events,
+                    gas_report: GasReport {
+                        gas_value: parser.gas_value.unwrap_or(U256::zero()),
+                        gas_recipient: parser.gas_recipient,
+                    },
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })
+}
+
+impl<'a> SolanaBlockParser<'a> {
+    pub fn new(chain_id: u64, tx_parser: &'a mut TxParser, slot_number: Slot) -> Self {
+        Self {
+            chain_id,
+            parsed_txs: ParsedTxs::new(),
+            tx_parser,
+            slot_number,
+        }
+    }
+
+    pub fn process_do_tx(
+        &mut self,
+        tx_idx: usize,
+        sol_tx: SolSignature,
+        instr_data: &[u8],
+        meta: &UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, rlp) = split_fee(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        let tx = decode_transaction_from_rlp(&Rlp::new(rlp))?;
+
+        let chain_id = tx
+            .chain_id
+            .ok_or(NoChainId)
+            .map_err(|e| {
+                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+                e
+            })?
+            .as_u64();
+
+        if chain_id == self.chain_id {
+            self.add_small_tx(tx_idx, tx, meta)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_do_tx_iterative(
+        &mut self,
+        tx_idx: usize,
+        sol_tx: SolSignature,
+        instr_data: &[u8],
+        meta: &UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, _, _, _, rlp) = do_tx_iterative::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        let tx = decode_transaction_from_rlp(&Rlp::new(rlp))?;
+        let chain_id = tx
+            .chain_id
+            .ok_or(NoChainId)
+            .map_err(|e| {
+                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+                e
+            })?
+            .as_u64();
+
+        if chain_id == self.chain_id {
+            self.add_small_tx(tx_idx, tx, meta)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_do_tx_holder(
+        &mut self,
+        tx_idx: usize,
+        sol_tx: SolSignature,
+        instr_data: &[u8],
+        meta: &UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, hash, chain_id, _) = do_tx_holder::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        if chain_id == self.chain_id {
+            self.add_big_tx(tx_idx, TxHash::from_slice(hash.as_bytes()), meta)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_do_tx_holder_iterative(
+        &mut self,
+        tx_idx: usize,
+        sol_tx: SolSignature,
+        instr_data: &[u8],
+        meta: &UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        let (_, _, hash, chain_id, _, _) =
+            do_tx_holder_iterative::args(instr_data).map_err(|e| {
+                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+                e
+            })?;
+
+        if chain_id == self.chain_id {
+            self.add_big_tx(tx_idx, TxHash::from_slice(hash.as_bytes()), meta)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_transmit_tx(
+        &mut self,
+        tx_idx: usize,
+        sol_tx: SolSignature,
+        instr_data: &[u8],
+    ) -> ProgramResult<()> {
+        let (_, offset, hash, chain_id, chunk) = transmit_tx::args(instr_data).map_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            e
+        })?;
+
+        if chain_id == self.chain_id {
+            self.parsed_txs
+                .entry(TxHash::from_slice(hash.as_bytes()))
+                .or_default()
+                .entry(tx_idx)
+                .or_insert(ParsedTxStep::TransmitTx {
+                    offset,
+                    data: chunk.to_vec(),
+                });
+        }
+
+        Ok(())
+    }
+
+    pub fn commit(self) {
+        if let Err(err) = self
+            .tx_parser
+            .register_slot_transactions(self.slot_number, self.parsed_txs)
+        {
+            tracing::warn!("Failed to register Solana transactions: {:?}", err);
+        }
+    }
+
+    fn add_small_tx(
+        &mut self,
+        tx_idx: usize,
+        tx: Transaction,
+        meta: &UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        self.parsed_txs
+            .entry(tx.hash)
+            .or_default()
+            .entry(tx_idx)
+            .or_insert(ParsedTxStep::SmallTx {
+                tx,
+                tx_result: parse_transaction_meta(meta)?,
+            });
+
+        Ok(())
+    }
+
+    fn add_big_tx(
+        &mut self,
+        tx_idx: usize,
+        tx_hash: TxHash,
+        meta: &UiTransactionStatusMeta,
+    ) -> ProgramResult<()> {
+        self.parsed_txs
+            .entry(tx_hash)
+            .or_default()
+            .entry(tx_idx)
+            .or_insert(ParsedTxStep::BigTx {
+                tx_result: parse_transaction_meta(meta)?,
+            });
+
+        Ok(())
+    }
+}
+
 pub struct BlockParser<'a, S: SolanaBlockStorage> {
     solana_block_storage: &'a S,
     tx_parser: &'a mut TxParser,
@@ -231,176 +444,9 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
         }
     }
 
-    fn parse_transaction_meta(meta: &UiTransactionStatusMeta) -> ProgramResult<Option<TxResult>> {
-        Ok(match &meta.log_messages {
-            OptionSerializer::Some(logs) => {
-                let mut parser = LogParser::new();
-                parser.parse(logs)?;
-                if let Some(exit_reason) = parser.exit_reason {
-                    Some(TxResult {
-                        exit_reason,
-                        logs: parser.events,
-                        gas_report: GasReport {
-                            gas_value: parser.gas_value.unwrap_or(U256::zero()),
-                            gas_recipient: parser.gas_recipient,
-                        },
-                    })
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-    }
-
-    fn process_do_tx(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        sol_tx: SolSignature,
-        instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<()> {
-        let (_, rlp) = split_fee(instr_data).map_err(|e| {
-            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
-        })?;
-
-        let tx = decode_transaction_from_rlp(&Rlp::new(rlp))?;
-
-        let chain_id = tx
-            .chain_id
-            .ok_or(NoChainId)
-            .map_err(|e| {
-                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-                e
-            })?
-            .as_u64();
-
-        if chain_id != self.chain_id {
-            return Ok(());
-        }
-
-        self.tx_parser.register_small_tx(
-            slot_number,
-            tx_idx,
-            tx,
-            Self::parse_transaction_meta(meta)?,
-        )
-    }
-
-    fn process_do_tx_iterative(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        sol_tx: SolSignature,
-        instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<()> {
-        let (_, _, _, _, rlp) = do_tx_iterative::args(instr_data).map_err(|e| {
-            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
-        })?;
-
-        let tx = decode_transaction_from_rlp(&Rlp::new(rlp))?;
-        let chain_id = tx
-            .chain_id
-            .ok_or(NoChainId)
-            .map_err(|e| {
-                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-                e
-            })?
-            .as_u64();
-
-        if chain_id != self.chain_id {
-            return Ok(());
-        }
-
-        self.tx_parser.register_small_tx(
-            slot_number,
-            tx_idx,
-            tx,
-            Self::parse_transaction_meta(meta)?,
-        )
-    }
-
-    fn process_do_tx_holder(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        sol_tx: SolSignature,
-        instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<()> {
-        let (_, hash, chain_id, _) = do_tx_holder::args(instr_data).map_err(|e| {
-            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
-        })?;
-
-        if chain_id != self.chain_id {
-            return Ok(());
-        }
-
-        self.tx_parser.register_big_tx(
-            slot_number,
-            tx_idx,
-            TxHash::from_slice(hash.as_bytes()),
-            Self::parse_transaction_meta(meta)?,
-        )
-    }
-
-    fn process_do_tx_holder_iterative(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        sol_tx: SolSignature,
-        instr_data: &[u8],
-        meta: &UiTransactionStatusMeta,
-    ) -> ProgramResult<()> {
-        let (_, _, hash, chain_id, _, _) =
-            do_tx_holder_iterative::args(instr_data).map_err(|e| {
-                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-                e
-            })?;
-
-        if chain_id != self.chain_id {
-            return Ok(());
-        }
-
-        self.tx_parser.register_big_tx(
-            slot_number,
-            tx_idx,
-            TxHash::from_slice(hash.as_bytes()),
-            Self::parse_transaction_meta(meta)?,
-        )
-    }
-
-    fn process_transmit_tx(
-        &mut self,
-        slot_number: Slot,
-        tx_idx: usize,
-        sol_tx: SolSignature,
-        instr_data: &[u8],
-    ) -> ProgramResult<()> {
-        let (_, offset, hash, chain_id, chunk) = transmit_tx::args(instr_data).map_err(|e| {
-            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
-        })?;
-
-        if chain_id != self.chain_id {
-            return Ok(());
-        }
-
-        self.tx_parser.register_transmit_tx(
-            slot_number,
-            tx_idx,
-            TxHash::from_slice(hash.as_bytes()),
-            offset,
-            chunk.to_vec(),
-        )
-    }
-
     fn register_block(&mut self, slot_number: Slot, solana_block: Arc<UiConfirmedBlock>) {
+        let mut sol_bp = SolanaBlockParser::new(self.chain_id, self.tx_parser, slot_number);
+
         parse_solana_block(&solana_block, self.program_id, |tx_idx, entry| {
             if entry.instr.data.is_empty() {
                 tracing::warn!("EVM Instruction data is empty")
@@ -409,27 +455,18 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
             let instr_data = &entry.instr.data[1..];
             if let Err(err) = match entry.instr.data[0] {
                 n if n == DoTx as u8 => {
-                    self.process_do_tx(slot_number, tx_idx, *entry.sol_tx, instr_data, entry.meta)
+                    sol_bp.process_do_tx(tx_idx, *entry.sol_tx, instr_data, entry.meta)
                 }
                 n if n == TransmitTx as u8 => {
-                    self.process_transmit_tx(slot_number, tx_idx, *entry.sol_tx, instr_data)
+                    sol_bp.process_transmit_tx(tx_idx, *entry.sol_tx, instr_data)
                 }
-                n if n == DoTxHolder as u8 => self.process_do_tx_holder(
-                    slot_number,
-                    tx_idx,
-                    *entry.sol_tx,
-                    instr_data,
-                    entry.meta,
-                ),
-                n if n == DoTxIterative as u8 => self.process_do_tx_iterative(
-                    slot_number,
-                    tx_idx,
-                    *entry.sol_tx,
-                    instr_data,
-                    entry.meta,
-                ),
-                n if n == DoTxHolderIterative as u8 => self.process_do_tx_holder_iterative(
-                    slot_number,
+                n if n == DoTxHolder as u8 => {
+                    sol_bp.process_do_tx_holder(tx_idx, *entry.sol_tx, instr_data, entry.meta)
+                }
+                n if n == DoTxIterative as u8 => {
+                    sol_bp.process_do_tx_iterative(tx_idx, *entry.sol_tx, instr_data, entry.meta)
+                }
+                n if n == DoTxHolderIterative as u8 => sol_bp.process_do_tx_holder_iterative(
                     tx_idx,
                     *entry.sol_tx,
                     instr_data,
@@ -438,12 +475,13 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
                 _ => Ok(()),
             } {
                 tracing::warn!(
-                    "Failed to parse Solana transaction {:?}: {:?}",
-                    entry.sol_tx,
+                    "Transaction {slot_number}:{tx_idx} parsing failed: {:?}",
                     err
                 )
             }
         });
+
+        sol_bp.commit();
     }
 
     pub async fn get_block_with_retries(
@@ -474,40 +512,38 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
 
     pub async fn parse(
         &mut self,
-        solana_slot_number: Slot,
+        final_slot: Slot,
         mut max_blocks: usize,
     ) -> ProgramResult<Option<BlockParseResult>> {
-        max_blocks = std::cmp::min(max_blocks, solana_slot_number as usize);
-        if let Some(mut current_block) = self
-            .solana_block_storage
-            .get_block(solana_slot_number)
-            .await?
-        {
-            let parent_slot_number = current_block.parent_slot;
+        max_blocks = std::cmp::min(max_blocks, final_slot as usize);
+        if let Some(mut current_block) = self.solana_block_storage.get_block(final_slot).await? {
+            let final_parent_slot = current_block.parent_slot;
             let timestamp = current_block.block_time;
 
-            let mut current_slot = solana_slot_number;
+            let mut current_slot = final_slot;
             let mut blocks_parsed: usize = 0;
 
             loop {
                 self.register_block(current_slot, current_block.clone());
                 blocks_parsed += 1;
 
-                if blocks_parsed > max_blocks || self.tx_parser.is_slot_complete(solana_slot_number)
-                {
-                    break;
+                if self.tx_parser.is_slot_complete(final_slot) {
+                    return Ok(Some(BlockParseResult {
+                        slot_number: final_slot,
+                        parent_slot_number: final_parent_slot,
+                        timestamp,
+                        transactions: self.tx_parser.finalize_slot(final_slot)?,
+                    }));
+                } else if blocks_parsed >= max_blocks {
+                    return Err(Custom(format!(
+                        "{:?} blocks parsed. Slot {:?} is not complete",
+                        max_blocks, final_slot
+                    )));
                 }
 
                 current_slot = current_block.parent_slot;
                 current_block = self.get_block_with_retries(current_slot).await?;
             }
-
-            Ok(Some(BlockParseResult {
-                slot_number: solana_slot_number,
-                parent_slot_number,
-                timestamp,
-                transactions: self.tx_parser.finalize_slot(solana_slot_number)?,
-            }))
         } else {
             Ok(None)
         }

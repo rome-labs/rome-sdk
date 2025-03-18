@@ -1,0 +1,1 @@
+DROP FUNCTION set_finalized_slot;

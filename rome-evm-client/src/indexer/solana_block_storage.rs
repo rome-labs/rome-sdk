@@ -9,6 +9,12 @@ pub trait SolanaBlockStorage: Send + Sync {
     async fn store_blocks(
         &self,
         blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
+        finalized_slot: Slot,
+    ) -> ProgramResult<()>;
+
+    async fn update_finalized_blocks(
+        &self,
+        blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
     ) -> ProgramResult<()>;
 
     async fn get_block(&self, slot_number: Slot) -> ProgramResult<Option<Arc<UiConfirmedBlock>>>;
@@ -16,4 +22,9 @@ pub trait SolanaBlockStorage: Send + Sync {
     async fn retain_from_slot(&self, from_slot: Slot) -> ProgramResult<()>;
 
     async fn get_last_slot(&self) -> ProgramResult<Option<Slot>>;
+
+    async fn set_finalized_slot(
+        &self,
+        slot: Slot,
+    ) -> ProgramResult<BTreeMap<Slot, UiConfirmedBlock>>;
 }

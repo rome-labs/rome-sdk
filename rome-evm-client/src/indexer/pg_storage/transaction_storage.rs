@@ -196,19 +196,19 @@ impl TransactionStorage {
 
     pub async fn blocks_produced(
         &self,
-        pending_blocks: PendingBlocks,
+        pending_blocks: &PendingBlocks,
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()> {
         self.pool.get()?.transaction(|conn| {
             for (block_id, pending_block) in pending_blocks {
-                if let Some(block_params) = produced_blocks.get(&block_id) {
+                if let Some(block_params) = produced_blocks.get(block_id) {
                     let mut block_gas_used = U256::zero();
                     let mut log_index = U256::zero();
-                    for (tx_index, (tx, tx_result)) in pending_block.transactions {
+                    for (tx_index, (tx, tx_result)) in &pending_block.transactions {
                         let receipt_params = ReceiptParams {
                             blockhash: block_params.hash,
                             block_number: block_params.number,
-                            tx_index,
+                            tx_index: *tx_index,
                             block_gas_used,
                             first_log_index: log_index,
                         };

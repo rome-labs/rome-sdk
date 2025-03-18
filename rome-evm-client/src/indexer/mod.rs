@@ -10,8 +10,9 @@ mod standalone_indexer;
 
 pub use crate::error::ProgramResult;
 pub use ethereum_block_storage::{
-    BlockParams, BlockProducer, BlockType, EthereumBlockStorage, PendingBlock, PendingBlocks,
-    ProducedBlocks, ReceiptParams,
+    BlockParams, BlockProducer, BlockType, EthereumBlockStorage, FinalizedBlock, PendingBlock,
+    PendingBlocks, ProducedBlocks, ProducerParams, ProductionResult, ReceiptParams,
+    ReproduceParams,
 };
 use ethers::addressbook::Address;
 use ethers::prelude::{H256, U256};
