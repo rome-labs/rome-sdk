@@ -135,12 +135,6 @@ impl TxBuilder {
         // Build the instruction
         atomic_tx.ix()?;
         let emulation = atomic_tx.emulation.as_ref().unwrap();
-        let vm = emulation.vm.as_ref().expect("Vm expected");
-
-        println!(
-            "VM steps executed: {}, allocated: {}, syscalls: {}",
-            vm.steps_executed, emulation.allocated, emulation.syscalls
-        );
 
         tracing::info!("Building Transaction");
         if emulation.is_atomic {
@@ -158,7 +152,7 @@ impl TxBuilder {
             .map(|(pubkey, item)| AccountMeta {
                 pubkey: *pubkey,
                 is_signer: false,
-                is_writable: item.writable,
+                is_writable: item.account.writeable,
             })
             .collect::<Vec<AccountMeta>>();
 
@@ -193,10 +187,7 @@ impl TxBuilder {
 }
 
 fn use_holder(ix: &OwnedAtomicIxBatch, payer: &Keypair) -> ProgramResult<bool> {
-    let data_len = ix
-        .iter()
-        .map(|a| a.data.len())
-        .fold(0_usize, |sum, len| sum + len);
+    let data_len = ix.iter().map(|a| a.data.len()).sum::<usize>();
 
     if data_len > i16::MAX as usize {
         return Ok(true);

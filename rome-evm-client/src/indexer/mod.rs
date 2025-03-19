@@ -1,22 +1,31 @@
+pub mod block_producers;
 pub mod config;
 mod ethereum_block_storage;
 pub mod inmemory;
+mod metrics_reporter;
 pub mod parsers;
+mod pending_blocks;
 pub mod pg_storage;
+mod produced_blocks;
 pub mod rollup_indexer;
 mod solana_block_loader;
 mod solana_block_storage;
 mod standalone_indexer;
 
 pub use crate::error::ProgramResult;
+pub use block_producers::block_producer::BlockProducer;
+pub use block_producers::block_producer::ProductionResult;
 pub use ethereum_block_storage::{
-    BlockParams, BlockProducer, BlockType, EthereumBlockStorage, FinalizedBlock, PendingBlock,
-    PendingBlocks, ProducedBlocks, ProducerParams, ProductionResult, ReceiptParams,
-    ReproduceParams,
+    BlockType, EthereumBlockStorage, FinalizedBlock, ProducerParams, ReproduceParams,
 };
 use ethers::addressbook::Address;
 use ethers::prelude::{H256, U256};
+pub use metrics_reporter::MetricsReporter;
 pub use parsers::block_parser::{BlockParseResult, BlockParser, TxResult};
+pub use pending_blocks::PendingBlocks;
+pub use pending_blocks::PendingL2Block;
+pub use produced_blocks::BlockParams;
+pub use produced_blocks::ProducedBlocks;
 pub use rollup_indexer::RollupIndexer;
 pub use solana_block_loader::SolanaBlockLoader;
 pub use solana_block_storage::SolanaBlockStorage;
@@ -92,6 +101,9 @@ pub mod test {
                 v: U64::from(signature.v),
                 r: signature.r,
                 s: signature.s,
+                source_hash: Default::default(),
+                mint: None,
+                is_system_tx: false,
                 transaction_type: None,
                 access_list: None,
                 max_priority_fee_per_gas: None,
@@ -146,6 +158,9 @@ pub mod test {
                 v: U64::from(signature.v),
                 r: signature.r,
                 s: signature.s,
+                source_hash: Default::default(),
+                mint: None,
+                is_system_tx: false,
                 transaction_type: None,
                 access_list: None,
                 max_priority_fee_per_gas: None,

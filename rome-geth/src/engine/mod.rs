@@ -5,10 +5,8 @@ use crate::engine::types::param::{
 };
 use ethers::core::types::{H256, U64};
 use ethers::prelude::ProviderError::CustomError;
-use ethers::types::U256;
+use ethers::types::{Address, U256};
 use reqwest::header::HeaderMap;
-use rome_evm_client::indexer::TxResult;
-use rome_evm_client::indexer::{BlockParams, PendingBlock};
 use rome_utils::auth::AuthState;
 use rome_utils::jsonrpc::{JsonRpcClient, JsonRpcRequest};
 use serde_json::{from_value, json, to_value};
@@ -21,7 +19,6 @@ use std::sync::{Arc, RwLock};
 pub mod claim;
 /// Geth engine configuration.
 pub mod config;
-pub mod engine_api_block_producer;
 /// Types related to geth engine.
 pub mod types;
 
@@ -31,6 +28,12 @@ pub struct GethEngine {
     _client: JsonRpcClient,
     geth_engine_secret: String,
     headers: Arc<RwLock<HeaderMap>>,
+}
+
+pub struct StateAdvanceTx {
+    pub rlp: String,
+    pub gas_price: u64,
+    pub gas_used: u64,
 }
 
 impl GethEngine {
@@ -114,49 +117,32 @@ impl GethEngine {
         finalized_blockhash: H256,
         parent_hash: H256,
         timestamp: U256,
-        pending_block: &PendingBlock,
+        transactions: Vec<StateAdvanceTx>,
+        gas_recipient: Option<Address>,
         finalize_new_block: bool,
-    ) -> anyhow::Result<BlockParams> {
+    ) -> anyhow::Result<(U64, H256)> {
         //
         // ------------------- Do fork choice update 1 -------------------
         //
 
         let finalized_blockhash = format!("0x{:x}", finalized_blockhash);
-
-        let gas_prices: Vec<u64> = pending_block
-            .transactions
-            .values()
-            .filter_map(|(tx, _)| tx.gas_price)
-            .map(|price| price.as_u64())
-            .collect();
-
-        let tx_results: Vec<&TxResult> = pending_block
-            .transactions
-            .values()
-            .map(|(_, tx_result)| tx_result)
-            .collect();
-
-        let gas_used: Vec<u64> = tx_results
+        let gas_used = transactions
             .iter()
-            .map(|tx_result| tx_result.gas_report.gas_value.as_u64())
-            .collect();
+            .map(|tx| tx.gas_used)
+            .collect::<Vec<u64>>();
 
         let forkchoice_params = ForkchoiceUpdateParams {
-            transactions: pending_block
-                .transactions
-                .values()
-                .map(|(tx, _)| serde_json::Value::from(tx.rlp().to_string()))
+            transactions: transactions
+                .iter()
+                .map(|tx| serde_json::Value::from(tx.rlp.clone()))
                 .collect(),
             timestamp: format!("0x{:x}", timestamp),
             prev_randao: "0xc130d5e63c61c935f6089e61140ca9136172677cf6aa5800dcc1cf0a02152a14"
                 .to_string(),
-            suggested_fee_recipient: format!(
-                "{:?}",
-                pending_block.gas_recipient.unwrap_or_default()
-            ),
+            suggested_fee_recipient: format!("{:?}", gas_recipient.unwrap_or_default()),
             withdrawals: vec![],
             no_tx_pool: true,
-            gas_prices,
+            gas_prices: transactions.iter().map(|tx| tx.gas_price).collect(),
             gas_used: gas_used.clone(),
         };
 
@@ -179,8 +165,6 @@ impl GethEngine {
 
         let parsed_fcu_res: ForkchoiceUpdateResponse = from_value(fcu1_res)?;
         let payload_id = parsed_fcu_res.payload_id;
-        // tracing::info!("Payload ID: {:#?}", payload_id);
-
         let get_payload_request = vec![json!(payload_id)];
         let payload_res = self
             .send_request("engine_getPayloadV2", get_payload_request)
@@ -227,11 +211,6 @@ impl GethEngine {
             .send_request("engine_forkchoiceUpdatedV2", forkchoice_request)
             .await?;
 
-        Ok(BlockParams {
-            hash: block_hash,
-            parent_hash: Some(parent_hash),
-            number: block_number,
-            timestamp,
-        })
+        Ok((block_number, block_hash))
     }
 }

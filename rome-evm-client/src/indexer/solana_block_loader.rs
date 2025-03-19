@@ -23,12 +23,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use tokio::task::JoinHandle;
 
-pub struct SolanaBlockLoader<S: SolanaBlockStorage + 'static> {
-    pub solana_block_storage: Arc<S>,
+pub struct SolanaBlockLoader {
+    pub solana_block_storage: Arc<dyn SolanaBlockStorage>,
     pub client: AsyncAtomicRpcClient,
     pub commitment: CommitmentLevel,
     pub program_id: Pubkey,
-    pub reorg_event_tx: UnboundedSender<Slot>,
     pub batch_size: Slot,
     pub block_retries: usize,
     pub tx_retries: usize,
@@ -266,7 +265,7 @@ async fn load_block(
     }
 }
 
-impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
+impl SolanaBlockLoader {
     async fn load_blocks(
         &self,
         mut slots: HashSet<Slot>,
@@ -354,6 +353,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
         &self,
         mut from_slot: Slot,
         interval: Duration,
+        reorg_event_tx: &UnboundedSender<Slot>,
     ) -> ProgramResult<Slot> {
         loop {
             from_slot = match self.get_latest_slots().await {
@@ -364,11 +364,13 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
                             .preload_blocks(current_slot, to_slot, finalized_slot)
                             .await?;
                     }
-                    self.update_finalized_slot(finalized_slot).await?;
+                    self.update_finalized_slot(finalized_slot, reorg_event_tx)
+                        .await?;
                     to_slot
                 }
                 Ok((_, finalized_slot)) => {
-                    self.update_finalized_slot(finalized_slot).await?;
+                    self.update_finalized_slot(finalized_slot, reorg_event_tx)
+                        .await?;
                     tokio::time::sleep(interval).await;
                     break Ok(from_slot);
                 }
@@ -386,6 +388,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
         start_slot: Option<Slot>,
         interval_ms: u64,
         idx_started_tx: Option<oneshot::Sender<()>>,
+        reorg_event_tx: UnboundedSender<Slot>,
     ) -> JoinHandle<ProgramResult<()>> {
         tokio::spawn(async move {
             let mut from_slot = self
@@ -401,7 +404,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
             tracing::info!("SolanaBlockLoader starting from slot: {:?}", from_slot);
             let sleep_duration = Duration::from_millis(interval_ms);
             from_slot = self
-                .preload_blocks_until_in_sync(from_slot, sleep_duration)
+                .preload_blocks_until_in_sync(from_slot, sleep_duration, &reorg_event_tx)
                 .await?;
 
             tracing::info!("SolanaBlockLoader is in sync with Solana validator");
@@ -413,7 +416,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
 
             loop {
                 from_slot = match self
-                    .preload_blocks_until_in_sync(from_slot, sleep_duration)
+                    .preload_blocks_until_in_sync(from_slot, sleep_duration, &reorg_event_tx)
                     .await
                 {
                     Ok(res) => res,
@@ -438,6 +441,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
         self,
         start_slot: Slot,
         end_slot: Option<Slot>,
+        reorg_event_tx: UnboundedSender<Slot>,
     ) -> JoinHandle<ProgramResult<()>> {
         tokio::spawn(async move {
             let mut end_slot = if let Some(value) = end_slot {
@@ -484,7 +488,9 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
             );
 
             while end_slot >= start_slot {
-                end_slot = self.check_batch(start_slot, end_slot).await?;
+                end_slot = self
+                    .check_batch(start_slot, end_slot, &reorg_event_tx)
+                    .await?;
             }
 
             tracing::info!("Check completed");
@@ -492,7 +498,12 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
         })
     }
 
-    async fn check_batch(&self, start_slot: Slot, end_slot: Slot) -> ProgramResult<Slot> {
+    async fn check_batch(
+        &self,
+        start_slot: Slot,
+        end_slot: Slot,
+        reorg_event_tx: &UnboundedSender<Slot>,
+    ) -> ProgramResult<Slot> {
         let mut num_checked = 0;
         let mut current_slot = end_slot;
         let mut blocks = BTreeMap::new();
@@ -501,28 +512,26 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
             let block =
                 if let Some(block) = self.solana_block_storage.get_block(current_slot).await? {
                     (*block).clone()
+                } else if let Some(block) = load_block(
+                    self.client.clone(),
+                    self.commitment,
+                    self.program_id,
+                    current_slot,
+                    self.tx_retries,
+                    self.retry_int,
+                )
+                .await?
+                {
+                    tracing::info!(
+                        "Block on slot {:?} missed in DB and reloaded.",
+                        current_slot
+                    );
+                    (*block).clone()
                 } else {
-                    if let Some(block) = load_block(
-                        self.client.clone(),
-                        self.commitment,
-                        self.program_id,
-                        current_slot,
-                        self.tx_retries,
-                        self.retry_int,
-                    )
-                    .await?
-                    {
-                        tracing::info!(
-                            "Block on slot {:?} missed in DB and reloaded.",
-                            current_slot
-                        );
-                        (*block).clone()
-                    } else {
-                        return Err(Custom(format!(
-                            "Failed to load block on slot {:?}",
-                            current_slot
-                        )));
-                    }
+                    return Err(Custom(format!(
+                        "Failed to load block on slot {:?}",
+                        current_slot
+                    )));
                 };
 
             let new_current_slot = block.parent_slot as Slot;
@@ -531,7 +540,8 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
             num_checked += 1;
         }
 
-        self.recheck_finalized_blocks(blocks).await?;
+        self.recheck_finalized_blocks(blocks, reorg_event_tx)
+            .await?;
 
         Ok(current_slot)
     }
@@ -544,11 +554,16 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
     //   from the reloaded Solana blocks.
     //
     // - Forces the rollup process to regenerate Ethereum blocks from the updated Solana blocks.
-    async fn update_finalized_slot(&self, finalized_slot: Slot) -> ProgramResult<()> {
+    async fn update_finalized_slot(
+        &self,
+        finalized_slot: Slot,
+        reorg_event_tx: &UnboundedSender<Slot>,
+    ) -> ProgramResult<()> {
         self.recheck_finalized_blocks(
             self.solana_block_storage
                 .set_finalized_slot(finalized_slot)
                 .await?,
+            reorg_event_tx,
         )
         .await
     }
@@ -556,6 +571,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
     async fn recheck_finalized_blocks(
         &self,
         blocks: BTreeMap<Slot, UiConfirmedBlock>,
+        reorg_event_tx: &UnboundedSender<Slot>,
     ) -> ProgramResult<()> {
         let futures = blocks
             .iter()
@@ -591,7 +607,7 @@ impl<S: SolanaBlockStorage + 'static> SolanaBlockLoader<S> {
             .await?;
 
         if let Some(slot_number) = reset_from_slot {
-            if let Err(err) = self.reorg_event_tx.send(slot_number) {
+            if let Err(err) = reorg_event_tx.send(slot_number) {
                 tracing::warn!(
                     "Failed to send reorg event for slot {:?}: {:?}",
                     slot_number,

@@ -6,7 +6,6 @@ edition = "2021"
 description = "Geth related functionality to access and advance rollup state"
 
 [dependencies]
-async-trait = { workspace = true }
 anyhow = { workspace = true }
 rome-utils = { workspace = true }
 tracing = { workspace = true }
@@ -19,5 +18,4 @@ jsonwebtoken = { workspace = true }
 url = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
-rome-evm-client = { workspace = true }
 bigdecimal = {workspace = true}

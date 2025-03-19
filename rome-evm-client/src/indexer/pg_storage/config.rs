@@ -18,7 +18,7 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 32;
 const DEFAULT_MAX_TIMEOUT_SEC: u64 = 60;
 
 impl PgPoolConfig {
-    pub fn create_pool(&self) -> ProgramResult<PgPool> {
+    pub fn init(&self) -> ProgramResult<PgPool> {
         let manager = ConnectionManager::<PgConnection>::new(self.database_url.clone());
         Ok(Pool::builder()
             .max_size(self.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS))

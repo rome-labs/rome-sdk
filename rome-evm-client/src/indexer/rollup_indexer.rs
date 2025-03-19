@@ -1,15 +1,14 @@
 use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
+use crate::indexer::block_producers::block_producer::BlockProducer;
 use crate::indexer::ethereum_block_storage::{ProducerParams, ReproduceParams};
 use crate::indexer::parsers::tx_parser::TxParser;
-use crate::indexer::{
-    BlockParams, BlockParseResult, BlockParser, BlockProducer, EthereumBlockStorage,
-    ProducedBlocks, SolanaBlockStorage,
-};
+use crate::indexer::produced_blocks::{BlockParams, ProducedBlocks};
+use crate::indexer::{BlockParseResult, BlockParser, EthereumBlockStorage, SolanaBlockStorage};
 use ethers::types::U64;
-use solana_sdk::{clock::Slot, pubkey::Pubkey};
+use solana_sdk::clock::Slot;
 use std::collections::BTreeMap;
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
@@ -19,40 +18,35 @@ const MAX_PARSE_BEHIND: Slot = 64;
 const BATCH_SIZE: usize = 1024;
 const NUM_RETRIES: usize = 500;
 
-pub struct RollupIndexer<
-    S: SolanaBlockStorage + 'static,
-    E: EthereumBlockStorage + 'static,
-    B: BlockProducer + 'static,
-> {
-    program_id: Pubkey,
+pub struct RollupIndexer {
     tx_parser: Arc<RwLock<TxParser>>,
-    solana_block_storage: Arc<S>,
-    ethereum_block_storage: Arc<E>,
-    block_producer: B,
+    block_parser: Arc<RwLock<BlockParser>>,
+    solana_block_storage: Arc<dyn SolanaBlockStorage>,
+    ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
+    block_producer: Option<Arc<dyn BlockProducer>>,
     max_slot_history: Option<Slot>,
 }
 
-impl<
-        S: SolanaBlockStorage + 'static,
-        E: EthereumBlockStorage + 'static,
-        B: BlockProducer + 'static,
-    > RollupIndexer<S, E, B>
-{
+impl RollupIndexer {
     pub fn new(
-        program_id: Pubkey,
-        solana_block_storage: Arc<S>,
-        ethereum_block_storage: Arc<E>,
-        block_producer: B,
+        block_parser: Arc<RwLock<BlockParser>>,
+        solana_block_storage: Arc<dyn SolanaBlockStorage>,
+        ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
+        block_producer: Option<Arc<dyn BlockProducer>>,
         max_slot_history: Option<Slot>,
     ) -> Self {
         Self {
-            program_id,
             tx_parser: Arc::new(RwLock::new(TxParser::new())),
+            block_parser,
             solana_block_storage,
             ethereum_block_storage,
             block_producer,
             max_slot_history,
         }
+    }
+
+    pub fn ethereum_block_storage(&self) -> Arc<dyn EthereumBlockStorage> {
+        self.ethereum_block_storage.clone()
     }
 
     pub fn start(
@@ -70,7 +64,11 @@ impl<
     }
 
     async fn pre_run(&self, start_slot: Option<Slot>, interval: Duration) -> ProgramResult<Slot> {
-        let last_block_in_producer = self.block_producer.last_produced_block().await?;
+        let Some(block_producer) = &self.block_producer else {
+            return Ok(start_slot.unwrap_or_default());
+        };
+
+        let last_block_in_producer = block_producer.last_produced_block().await?;
         let last_block_in_storage = self.ethereum_block_storage.latest_block().await?;
 
         Ok(if let Some(last_block_in_storage) = last_block_in_storage {
@@ -160,6 +158,10 @@ impl<
         max_slot: Slot,
         batch_size: Slot,
     ) -> ProgramResult<Slot> {
+        let Some(block_producer) = &self.block_producer else {
+            return Ok(from_slot);
+        };
+
         let to_slot = from_slot + std::cmp::min(max_slot - from_slot, batch_size);
         if let Some(ReproduceParams {
             producer_params,
@@ -169,24 +171,28 @@ impl<
             .reproduce_blocks(from_slot, to_slot)
             .await?
         {
-            let production_result = self
-                .block_producer
+            let production_result = block_producer
                 .produce_blocks(&producer_params, Some(batch_size as usize))
                 .await?;
 
             // Check results of block reproduction
-            for (block_id, expected_params) in expected_results {
-                if let Some(new_block_params) = production_result.produced_blocks.get(&block_id) {
-                    if &expected_params != new_block_params {
+            for (slot_number, block_idx, expected_params) in expected_results.iter() {
+                if let Some(new_block_params) = production_result
+                    .produced_blocks
+                    .get(slot_number, block_idx)
+                {
+                    if expected_params.ne(new_block_params) {
                         return Err(Custom(format!(
                             "Block reproduction failed at {:?}:\n Expected\n {:?} received {:?}",
-                            block_id, expected_params, new_block_params
+                            (slot_number, block_idx),
+                            expected_params,
+                            new_block_params
                         )));
                     }
                 } else {
                     return Err(Custom(format!(
                         "reproduce_blocks: Block {:?} was not reproduced",
-                        block_id
+                        (slot_number, block_idx)
                     )));
                 }
             }
@@ -236,19 +242,12 @@ impl<
                         .parse_blocks_batch(current_slot, to_slot, batch_size)
                         .await?;
 
-                    if let Some(production_params) = self
-                        .ethereum_block_storage
+                    self.ethereum_block_storage
                         .register_parse_results(parse_results)
-                        .await?
-                    {
-                        self.restore_or_produce_blocks(
-                            production_params,
-                            interval,
-                            batch_size as usize,
-                        )
                         .await?;
-                    }
 
+                    self.restore_or_produce_blocks(interval, batch_size as usize)
+                        .await?;
                     self.retain_storages(current_slot).await;
                     current_slot = new_current_slot;
                 }
@@ -276,16 +275,15 @@ impl<
         tracing::debug!("Parsing blocks from_slot {from_slot}, to_slot {to_slot}");
         let mut parse_results = BTreeMap::new();
         let mut tx_parser = self.tx_parser.write().await;
-        let mut block_parser = BlockParser::new(
-            self.solana_block_storage.deref(),
-            tx_parser.deref_mut(),
-            self.program_id,
-            self.ethereum_block_storage.chain(),
-        );
+        let mut block_parser = self.block_parser.write().await;
 
         for slot_number in from_slot..to_slot {
             if let Some(parse_result) = block_parser
-                .parse(slot_number, MAX_PARSE_BEHIND as usize)
+                .parse(
+                    slot_number,
+                    MAX_PARSE_BEHIND as usize,
+                    tx_parser.deref_mut(),
+                )
                 .await?
             {
                 parse_results.insert(slot_number, parse_result);
@@ -318,16 +316,24 @@ impl<
 
     async fn restore_or_produce_blocks(
         &self,
-        mut producer_params: ProducerParams,
         interval: Duration,
         batch_size: usize,
     ) -> ProgramResult<()> {
+        let Some(block_producer) = &self.block_producer else {
+            return Ok(());
+        };
+
+        let Some(mut producer_params) = self.ethereum_block_storage.get_pending_blocks().await?
+        else {
+            return Ok(());
+        };
+
         let last_block_in_storage = self
             .ethereum_block_storage
             .latest_block()
             .await?
             .unwrap_or_default();
-        let last_block_in_producer = self.block_producer.last_produced_block().await?;
+        let last_block_in_producer = block_producer.last_produced_block().await?;
 
         if last_block_in_storage + 1 < last_block_in_producer {
             self.restore_blocks(
@@ -340,24 +346,21 @@ impl<
             .await?;
         } else {
             loop {
-                let production_result = self
-                    .block_producer
+                let production_result = block_producer
                     .produce_blocks(&producer_params, Some(batch_size))
                     .await?;
 
-                if let Some((last_prod_block_id, last_prod_block_hash)) = production_result
-                    .produced_blocks
-                    .last_key_value()
-                    .map(|(last_prod_block_id, params)| (*last_prod_block_id, params.hash))
+                if let Some((last_slot_number, last_block_idx, last_block_params)) =
+                    production_result.produced_blocks.last_key_value()
                 {
                     self.ethereum_block_storage
                         .blocks_produced(&producer_params, production_result.produced_blocks)
                         .await?;
 
-                    producer_params.parent_hash = Some(last_prod_block_hash);
+                    producer_params.parent_hash = Some(last_block_params.hash);
                     producer_params
                         .pending_blocks
-                        .retain(|block_id, _| block_id.gt(&last_prod_block_id));
+                        .retain_after(last_slot_number, last_block_idx);
                 } else {
                     break;
                 }
@@ -380,8 +383,8 @@ impl<
             .get_blocks_params(from_block, to_block, num_retries, interval)
             .await?;
 
-        let mut produced_blocks = ProducedBlocks::new();
-        for block_id in producer_params.pending_blocks.keys() {
+        let mut produced_blocks = ProducedBlocks::default();
+        for (slot_number, block_idx) in producer_params.pending_blocks.keys() {
             if let Some((_, block_params)) = blocks_params.pop_first() {
                 if parent_hash != block_params.parent_hash {
                     return Err(Custom(format!(
@@ -391,7 +394,7 @@ impl<
                 }
 
                 parent_hash = Some(block_params.hash);
-                produced_blocks.insert(*block_id, block_params);
+                produced_blocks.insert(*slot_number, *block_idx, block_params);
             } else {
                 break;
             }
@@ -434,9 +437,15 @@ impl<
         num_retries: usize,
         interval: Duration,
     ) -> ProgramResult<BlockParams> {
+        let Some(block_producer) = &self.block_producer else {
+            return Err(Custom(
+                "BlockProducer is not set, can't get block params".to_string(),
+            ));
+        };
+
         let mut retries_remaining = num_retries;
         loop {
-            match self.block_producer.get_block_params(block_number).await {
+            match block_producer.get_block_params(block_number).await {
                 Ok(params) => return Ok(params),
                 Err(e) => {
                     retries_remaining -= 1;

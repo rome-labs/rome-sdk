@@ -1,15 +1,18 @@
-use crate::indexer::ethereum_block_storage::EthBlockId;
+use crate::error::RomeEvmError;
+use crate::indexer::parsers::l1_attributes::create_l1_attributes_tx;
 use crate::indexer::parsers::log_parser;
 use crate::indexer::parsers::log_parser::LogParser;
 use crate::indexer::parsers::tx_parser::{
     decode_transaction_from_rlp, ParsedTxStep, ParsedTxs, TxParser,
 };
-use crate::indexer::{BlockParams, BlockType};
+use crate::indexer::produced_blocks::BlockParams;
+use crate::indexer::BlockType;
 use ethers::addressbook::Address;
 use ethers::prelude::{Block, Log, H256};
 use ethers::types::{BigEndianHash, Transaction};
 use jsonrpsee_core::Serialize;
 use serde::Deserialize;
+use solana_sdk::bs58;
 use {
     crate::{
         error::{ProgramResult, RomeEvmError::*},
@@ -91,7 +94,7 @@ pub struct GasReport {
     pub gas_recipient: Option<Address>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxResult {
     pub exit_reason: log_parser::ExitReason,
     pub logs: Vec<Log>,
@@ -100,8 +103,6 @@ pub struct TxResult {
 
 #[derive(Clone, Debug)]
 pub struct EthBlock {
-    pub id: EthBlockId,
-
     // Values obtained from parsing stage
     pub block_gas_used: U256,
     pub transactions: Vec<TxHash>,
@@ -143,24 +144,66 @@ impl EthBlock {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockParseMode {
+    EngineApi,
+    SingleState,
+}
+
+#[derive(Clone)]
 pub struct BlockParseResult {
     pub slot_number: Slot,
     pub parent_slot_number: Slot,
+    pub solana_blockhash: String,
+    pub parent_solana_blockhash: String,
     pub timestamp: Option<UnixTimestamp>,
     pub transactions: Vec<(Transaction, TxResult)>,
+    pub parse_mode: BlockParseMode,
 }
 
 impl BlockParseResult {
+    pub fn new(
+        slot_number: Slot,
+        solana_block: Arc<UiConfirmedBlock>,
+        tx_parser: &TxParser,
+        parse_mode: BlockParseMode,
+    ) -> ProgramResult<Self> {
+        Ok(Self {
+            slot_number,
+            parent_slot_number: solana_block.parent_slot,
+            solana_blockhash: solana_block.blockhash.clone(),
+            parent_solana_blockhash: solana_block.previous_blockhash.clone(),
+            timestamp: solana_block.block_time,
+            parse_mode,
+            transactions: Some(create_l1_attributes_tx(
+                slot_number,
+                H256::from_slice(&bs58::decode(&solana_block.blockhash).into_vec().map_err(
+                    |_| {
+                        RomeEvmError::Custom(format!(
+                            "Solana block {:?} invalid blockhash: {}",
+                            slot_number, solana_block.blockhash
+                        ))
+                    },
+                )?),
+                U256::from(solana_block.block_time.ok_or(RomeEvmError::Custom(format!(
+                    "Solana block {:?} timestamp is not set",
+                    slot_number
+                )))?),
+            ))
+            .into_iter()
+            .chain(tx_parser.finalize_slot(slot_number)?)
+            .collect(),
+        })
+    }
+
     fn new_eth_block(
         &self,
-        block_idx: usize,
         transactions: Vec<TxHash>,
         block_gas_used: U256,
         gas_recipient: Option<Address>,
     ) -> EthBlock {
         EthBlock {
-            id: (self.slot_number, block_idx),
             block_gas_used,
             transactions,
             gas_recipient,
@@ -170,48 +213,58 @@ impl BlockParseResult {
     }
 
     pub fn create_eth_blocks(&self) -> Vec<EthBlock> {
-        let mut block_gas_used = U256::zero();
-        let mut eth_blocks = Vec::new();
+        match self.parse_mode {
+            BlockParseMode::EngineApi => {
+                let mut block_gas_used = U256::zero();
+                let mut eth_blocks = Vec::new();
 
-        let mut block_txs = Vec::new();
-        let mut gas_recipient = None;
+                let mut block_txs = Vec::new();
+                let mut gas_recipient = None;
 
-        for (tx, tx_result) in self.transactions.iter() {
-            if tx_result.gas_report.gas_recipient == gas_recipient {
-                // Several transactions with the same gas recipient are included in a single block
-                block_txs.push(tx.hash);
-                block_gas_used += tx_result.gas_report.gas_value;
-            } else {
-                if block_txs.is_empty() {
-                    // First transaction with gas recipient other than previous (or default which is None)
-                    block_txs.push(tx.hash);
-                    block_gas_used = tx_result.gas_report.gas_value;
-                    gas_recipient = tx_result.gas_report.gas_recipient;
-                    continue;
+                for (tx, tx_result) in self.transactions.iter() {
+                    if tx_result.gas_report.gas_recipient == gas_recipient {
+                        // Several transactions with the same gas recipient are included in a single block
+                        block_txs.push(tx.hash);
+                        block_gas_used += tx_result.gas_report.gas_value;
+                    } else {
+                        if block_txs.is_empty() {
+                            // First transaction with gas recipient other than previous (or default which is None)
+                            block_txs.push(tx.hash);
+                            block_gas_used = tx_result.gas_report.gas_value;
+                            gas_recipient = tx_result.gas_report.gas_recipient;
+                            continue;
+                        }
+
+                        eth_blocks.push(self.new_eth_block(
+                            block_txs,
+                            block_gas_used,
+                            gas_recipient,
+                        ));
+                        block_txs = vec![tx.hash];
+                        block_gas_used = tx_result.gas_report.gas_value;
+                        gas_recipient = tx_result.gas_report.gas_recipient;
+                    }
                 }
 
-                eth_blocks.push(self.new_eth_block(
-                    eth_blocks.len(),
-                    block_txs,
-                    block_gas_used,
-                    gas_recipient,
-                ));
-                block_txs = vec![tx.hash];
-                block_gas_used = tx_result.gas_report.gas_value;
-                gas_recipient = tx_result.gas_report.gas_recipient;
+                if !block_txs.is_empty() {
+                    eth_blocks.push(self.new_eth_block(block_txs, block_gas_used, gas_recipient));
+                }
+
+                eth_blocks
+            }
+
+            BlockParseMode::SingleState => {
+                let mut block_gas_used = U256::zero();
+                let mut block_txs = Vec::new();
+
+                for (tx, tx_result) in self.transactions.iter() {
+                    block_txs.push(tx.hash);
+                    block_gas_used += tx_result.gas_report.gas_value;
+                }
+
+                vec![self.new_eth_block(block_txs, block_gas_used, None)]
             }
         }
-
-        if !block_txs.is_empty() {
-            eth_blocks.push(self.new_eth_block(
-                eth_blocks.len(),
-                block_txs,
-                block_gas_used,
-                gas_recipient,
-            ));
-        }
-
-        eth_blocks
     }
 }
 
@@ -261,9 +314,8 @@ impl<'a> SolanaBlockParser<'a> {
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
     ) -> ProgramResult<()> {
-        let (_, rlp) = split_fee(instr_data).map_err(|e| {
+        let (_, rlp) = split_fee(instr_data).inspect_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
         })?;
 
         let tx = decode_transaction_from_rlp(&Rlp::new(rlp))?;
@@ -271,10 +323,7 @@ impl<'a> SolanaBlockParser<'a> {
         let chain_id = tx
             .chain_id
             .ok_or(NoChainId)
-            .map_err(|e| {
-                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-                e
-            })?
+            .inspect_err(|e| tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string()))?
             .as_u64();
 
         if chain_id == self.chain_id {
@@ -291,18 +340,16 @@ impl<'a> SolanaBlockParser<'a> {
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
     ) -> ProgramResult<()> {
-        let (_, _, _, _, rlp) = do_tx_iterative::args(instr_data).map_err(|e| {
+        let (_, _, _, _, rlp) = do_tx_iterative::args(instr_data).inspect_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
         })?;
 
         let tx = decode_transaction_from_rlp(&Rlp::new(rlp))?;
         let chain_id = tx
             .chain_id
             .ok_or(NoChainId)
-            .map_err(|e| {
+            .inspect_err(|e| {
                 tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-                e
             })?
             .as_u64();
 
@@ -320,9 +367,8 @@ impl<'a> SolanaBlockParser<'a> {
         instr_data: &[u8],
         meta: &UiTransactionStatusMeta,
     ) -> ProgramResult<()> {
-        let (_, hash, chain_id, _) = do_tx_holder::args(instr_data).map_err(|e| {
+        let (_, hash, chain_id, _) = do_tx_holder::args(instr_data).inspect_err(|e| {
             tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
         })?;
 
         if chain_id == self.chain_id {
@@ -340,9 +386,8 @@ impl<'a> SolanaBlockParser<'a> {
         meta: &UiTransactionStatusMeta,
     ) -> ProgramResult<()> {
         let (_, _, hash, chain_id, _, _) =
-            do_tx_holder_iterative::args(instr_data).map_err(|e| {
+            do_tx_holder_iterative::args(instr_data).inspect_err(|e| {
                 tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-                e
             })?;
 
         if chain_id == self.chain_id {
@@ -358,10 +403,10 @@ impl<'a> SolanaBlockParser<'a> {
         sol_tx: SolSignature,
         instr_data: &[u8],
     ) -> ProgramResult<()> {
-        let (_, offset, hash, chain_id, chunk) = transmit_tx::args(instr_data).map_err(|e| {
-            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
-            e
-        })?;
+        let (_, offset, hash, chain_id, chunk) =
+            transmit_tx::args(instr_data).inspect_err(|e| {
+                tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+            })?;
 
         if chain_id == self.chain_id {
             self.parsed_txs
@@ -422,30 +467,35 @@ impl<'a> SolanaBlockParser<'a> {
     }
 }
 
-pub struct BlockParser<'a, S: SolanaBlockStorage> {
-    solana_block_storage: &'a S,
-    tx_parser: &'a mut TxParser,
-    program_id: Pubkey,
-    chain_id: u64,
+pub struct BlockParser {
+    solana_block_storage: Arc<dyn SolanaBlockStorage>,
+    pub program_id: Pubkey,
+    pub chain_id: u64,
+    pub parse_mode: BlockParseMode,
 }
 
-impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
+impl BlockParser {
     pub fn new(
-        solana_block_storage: &'a S,
-        tx_parser: &'a mut TxParser,
+        solana_block_storage: Arc<dyn SolanaBlockStorage>,
         program_id: Pubkey,
         chain_id: u64,
+        parse_mode: BlockParseMode,
     ) -> Self {
         BlockParser {
             solana_block_storage,
-            tx_parser,
             program_id,
             chain_id,
+            parse_mode,
         }
     }
 
-    fn register_block(&mut self, slot_number: Slot, solana_block: Arc<UiConfirmedBlock>) {
-        let mut sol_bp = SolanaBlockParser::new(self.chain_id, self.tx_parser, slot_number);
+    fn register_block(
+        &self,
+        slot_number: Slot,
+        solana_block: Arc<UiConfirmedBlock>,
+        tx_parser: &mut TxParser,
+    ) {
+        let mut sol_bp = SolanaBlockParser::new(self.chain_id, tx_parser, slot_number);
 
         parse_solana_block(&solana_block, self.program_id, |tx_idx, entry| {
             if entry.instr.data.is_empty() {
@@ -514,26 +564,25 @@ impl<'a, S: SolanaBlockStorage> BlockParser<'a, S> {
         &mut self,
         final_slot: Slot,
         mut max_blocks: usize,
+        tx_parser: &mut TxParser,
     ) -> ProgramResult<Option<BlockParseResult>> {
         max_blocks = std::cmp::min(max_blocks, final_slot as usize);
-        if let Some(mut current_block) = self.solana_block_storage.get_block(final_slot).await? {
-            let final_parent_slot = current_block.parent_slot;
-            let timestamp = current_block.block_time;
-
+        if let Some(final_block) = self.solana_block_storage.get_block(final_slot).await? {
             let mut current_slot = final_slot;
+            let mut current_block = final_block.clone();
             let mut blocks_parsed: usize = 0;
 
             loop {
-                self.register_block(current_slot, current_block.clone());
+                self.register_block(current_slot, current_block.clone(), tx_parser);
                 blocks_parsed += 1;
 
-                if self.tx_parser.is_slot_complete(final_slot) {
-                    return Ok(Some(BlockParseResult {
-                        slot_number: final_slot,
-                        parent_slot_number: final_parent_slot,
-                        timestamp,
-                        transactions: self.tx_parser.finalize_slot(final_slot)?,
-                    }));
+                if tx_parser.is_slot_complete(final_slot) {
+                    return Ok(Some(BlockParseResult::new(
+                        final_slot,
+                        final_block,
+                        tx_parser,
+                        self.parse_mode,
+                    )?));
                 } else if blocks_parsed >= max_blocks {
                     return Err(Custom(format!(
                         "{:?} blocks parsed. Slot {:?} is not complete",

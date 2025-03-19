@@ -3,11 +3,9 @@ use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
 
 use crate::error::RomeEvmError::Custom;
 use crate::error::{ProgramResult, RomeEvmError};
-use crate::indexer::{
-    BlockParams, BlockProducer, ProducedBlocks, ProductionResult, SolanaBlockStorage,
-    StandaloneIndexer,
-};
+use crate::indexer::{BlockParams, BlockParser, BlockProducer, ProducedBlocks, ProductionResult};
 use crate::indexer::{BlockType, EthereumBlockStorage, ProducerParams};
+use crate::indexer::{RollupIndexer, SolanaBlockLoader, SolanaBlockStorage, StandaloneIndexer};
 use crate::tx::TxBuilder;
 use crate::util::{check_exit_reason, RomeEvmUtil};
 use crate::Payer;
@@ -29,15 +27,21 @@ use solana_sdk::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::{sync::oneshot, task::JoinHandle};
+
+const BLOCK_RETRIES: usize = 10;
+const TX_RETRIES: usize = 10;
+const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Client component interacting with the instance of Rome-EVM smart-contract on Solana blockchain
 /// (Rome-EVM Rollup).
 ///
 /// Interface of RomeEVMClient is designed to be closely compatible with standard Ethereum JSON RPC
 /// and mostly repeats its functionality.
-pub struct RomeEVMClient<E: EthereumBlockStorage + 'static> {
-    ethereum_block_storage: Arc<E>,
+pub struct RomeEVMClient {
+    ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
 
     tx_builder: TxBuilder,
 
@@ -81,17 +85,18 @@ impl BlockProducer for DummyBlockProducer {
         limit: Option<usize>,
     ) -> ProgramResult<ProductionResult> {
         let mut parent_hash = producer_params.parent_hash;
-        let mut produced_blocks = ProducedBlocks::new();
-        for (block_id, pending_block) in &producer_params.pending_blocks {
+        let mut produced_blocks = ProducedBlocks::default();
+        for (slot_number, pending_l1_block, block_idx, _) in producer_params.pending_blocks.iter() {
             let block_number = self.next_block.fetch_add(1, Ordering::Relaxed);
             let blockhash = H256::random();
             produced_blocks.insert(
-                *block_id,
+                *slot_number,
+                *block_idx,
                 BlockParams {
                     hash: blockhash,
                     parent_hash,
                     number: U64::from(block_number),
-                    timestamp: U256::from(pending_block.slot_timestamp.unwrap_or_default()),
+                    timestamp: pending_l1_block.timestamp,
                 },
             );
             parent_hash = Some(blockhash);
@@ -110,30 +115,26 @@ impl BlockProducer for DummyBlockProducer {
     }
 }
 
-impl<E: EthereumBlockStorage + 'static> RomeEVMClient<E> {
+impl RomeEVMClient {
     /// Constructor
     ///
     /// * `chain_id` - Chain ID of a Rollup
     /// * `program_id` - Address of a Rollup Solana smart-contract
-    /// * `payer` - Solana account keypair used to sign transactions to Rollup smart-contract
-    /// * `client` - Solana RPC Client
-    /// * `number_holders` - number of holder accounts used by this instance of client.
-    ///                      Determines maximum number of parallel transactions which
-    ///                      this particular client can execute simultaneously.
+    /// * `solana` - Solana RPC Client
     /// * `commitment_level` - Solana commitment level used to execute and index transactions
-    /// * `start_slot` - number of solana slot to start indexing from
-    /// * `token` - token to call Graceful Shutdown of the async tasks
+    /// * `ethereum_block_storage` - Ethereum block storage
+    /// * `payer` - Solana account keypair used to sign transactions to Rollup smart-contract
     ///
     /// Returns tuple (<Client_instance, Run_future>)
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        chain_id: u64,
         program_id: Pubkey,
         solana: SolanaTower,
         commitment_level: CommitmentLevel,
-        ethereum_block_storage: Arc<E>,
+        ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
         payers: Vec<Payer>,
     ) -> Self {
-        let chain_id = ethereum_block_storage.chain();
         let sync_client = Arc::new(RpcClient::new_with_commitment(
             solana.client().url(),
             solana.client().commitment(),
@@ -156,27 +157,37 @@ impl<E: EthereumBlockStorage + 'static> RomeEVMClient<E> {
     /// Start the indexer and consume blocks
     pub fn start_indexing<S: SolanaBlockStorage + 'static>(
         &self,
+        block_parser: BlockParser,
         solana_block_storage: Arc<S>,
         start_slot: Option<Slot>,
         idx_started_oneshot: Option<oneshot::Sender<()>>,
         max_slot_history: Option<Slot>,
         block_loader_batch_size: Slot,
     ) -> JoinHandle<()> {
-        StandaloneIndexer {
-            solana_client: self.solana.client_cloned(),
-            commitment_level: self.commitment_level,
-            rome_evm_pubkey: *self.program_id(),
-            solana_block_storage,
-            ethereum_block_storage: self.ethereum_block_storage.clone(),
-            block_producer: DummyBlockProducer::new(),
-        }
-        .start_indexing(
-            start_slot,
-            idx_started_oneshot,
-            INDEXING_INTERVAL_MS,
+        let solana_block_loader = SolanaBlockLoader {
+            solana_block_storage: solana_block_storage.clone(),
+            client: self.solana.client_cloned(),
+            commitment: self.commitment_level,
+            program_id: *self.program_id(),
+            batch_size: block_loader_batch_size,
+            block_retries: BLOCK_RETRIES,
+            tx_retries: TX_RETRIES,
+            retry_int: RETRY_INTERVAL,
+        };
+
+        let rollup_indexer = RollupIndexer::new(
+            Arc::new(RwLock::new(block_parser)),
+            solana_block_storage.clone(),
+            self.ethereum_block_storage.clone(),
+            Some(Arc::new(DummyBlockProducer::new())),
             max_slot_history,
-            block_loader_batch_size,
-        )
+        );
+
+        StandaloneIndexer {
+            solana_block_loader,
+            rollup_indexer,
+        }
+        .start_indexing(start_slot, idx_started_oneshot, INDEXING_INTERVAL_MS)
     }
 
     /// Executes transaction in a Rollup smart-contract

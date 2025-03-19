@@ -1,8 +1,9 @@
 use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
-use crate::indexer::pg_storage::PgPool;
-use crate::indexer::{self, BlockParseResult, ReceiptParams, TxResult};
-use crate::indexer::{PendingBlocks, ProducedBlocks};
+use crate::indexer::pending_blocks::PendingBlocks;
+use crate::indexer::pg_storage::{types::ReceiptParams, PgPool};
+use crate::indexer::produced_blocks::ProducedBlocks;
+use crate::indexer::{self, BlockParseResult, TxResult};
 use diesel::{
     self,
     sql_types::{BigInt, Binary, Bytea, Json, Jsonb, Nullable, Text, VarChar},
@@ -98,6 +99,11 @@ fn new_receipt(
         } else {
             panic!("No gas_price nor max_priority_fee_per_gas defined")
         },
+        deposit_nonce: None,
+        l1_fee: None,
+        l1_fee_scalar: None,
+        l1_gas_price: None,
+        l1_gas_used: None,
         other: OtherFields::default(),
     }
 }
@@ -200,8 +206,8 @@ impl TransactionStorage {
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()> {
         self.pool.get()?.transaction(|conn| {
-            for (block_id, pending_block) in pending_blocks {
-                if let Some(block_params) = produced_blocks.get(block_id) {
+            for (slot_number, block_idx, block_params) in produced_blocks.iter() {
+                if let Some(pending_block) = pending_blocks.get(slot_number, block_idx) {
                     let mut block_gas_used = U256::zero();
                     let mut log_index = U256::zero();
                     for (tx_index, (tx, tx_result)) in &pending_block.transactions {
@@ -216,10 +222,12 @@ impl TransactionStorage {
                         log_index += U256::from(tx_result.logs.len());
                         diesel::sql_query("UPDATE evm_tx_result SET receipt_params = $1 WHERE slot_number = $2 AND tx_hash = $3;")
                             .bind::<Nullable<Jsonb>, _>(Some(serde_json::to_value(receipt_params)?))
-                            .bind::<BigInt, _>(block_id.0 as i64)
+                            .bind::<BigInt, _>(*slot_number as i64)
                             .bind::<VarChar, _>(tx.hash.encode_hex())
                             .execute(conn)?;
                     }
+                } else {
+                    tracing::warn!("Pending block {:?} not found", (slot_number, block_idx));
                 }
             }
 

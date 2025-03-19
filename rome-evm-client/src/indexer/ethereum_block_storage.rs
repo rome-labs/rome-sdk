@@ -1,5 +1,6 @@
 use crate::error::ProgramResult;
-use crate::indexer::parsers::block_parser::TxResult;
+use crate::indexer::pending_blocks::PendingBlocks;
+use crate::indexer::produced_blocks::ProducedBlocks;
 use crate::indexer::BlockParseResult;
 use async_trait::async_trait;
 use ethers::addressbook::Address;
@@ -9,8 +10,6 @@ use ethers::prelude::{
 };
 use ethers::types::U64;
 use jsonrpsee_core::Serialize;
-use serde::Deserialize;
-use solana_program::clock::UnixTimestamp;
 use solana_sdk::clock::Slot;
 use std::collections::BTreeMap;
 
@@ -18,47 +17,30 @@ use std::collections::BTreeMap;
 // Consists of Solana slot number and index of the Eth block within this slot
 pub type EthBlockId = (Slot, usize);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum FinalizedBlock {
     Produced(H256),
     Pending(EthBlockId),
 }
 
-#[derive(Clone, Default)]
-pub struct PendingBlock {
-    pub transactions: BTreeMap<usize, (Transaction, TxResult)>,
-    pub gas_recipient: Option<Address>,
-    pub slot_timestamp: Option<UnixTimestamp>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockParams {
-    pub hash: H256,
+/// Contains set of pending blocks residing on the same branch of the Solana history and
+/// additional parameters for its production
+#[derive(Clone, Serialize)]
+pub struct ProducerParams {
+    /// Hash of the eth-block on top of which pending blocks must be appended
     pub parent_hash: Option<H256>,
-    pub number: U64,
-    pub timestamp: U256,
+
+    /// Latest finalized eth-block. it can yet have no blockhash (not produced). In that case,
+    /// this block is referenced by Solana slot number and index within corresponding Solana block
+    pub finalized_block: Option<FinalizedBlock>,
+
+    /// Set of pending blocks all resides on the same branch of solana block history
+    pub pending_blocks: PendingBlocks,
 }
 
-pub type PendingBlocks = BTreeMap<EthBlockId, PendingBlock>;
-pub type ProducedBlocks = BTreeMap<EthBlockId, BlockParams>;
-
-pub struct ProductionResult {
-    pub produced_blocks: ProducedBlocks,
-    pub finalized_block: H256,
-}
-
-#[async_trait]
-pub trait BlockProducer: Send + Sync {
-    async fn last_produced_block(&self) -> ProgramResult<U64>;
-
-    async fn get_block_params(&self, block_number: U64) -> ProgramResult<BlockParams>;
-
-    // Builds chain from pending_blocks on top of block with given parent_hash in a given order
-    async fn produce_blocks(
-        &self,
-        producer_params: &ProducerParams,
-        limit: Option<usize>,
-    ) -> ProgramResult<ProductionResult>;
+pub struct ReproduceParams {
+    pub producer_params: ProducerParams,
+    pub expected_results: ProducedBlocks,
 }
 
 const SHA3_UNCLES: [u8; 32] = [
@@ -137,71 +119,70 @@ impl BlockType {
     }
 }
 
-pub struct ProducerParams {
-    pub parent_hash: Option<H256>,
-    pub finalized_block: Option<FinalizedBlock>,
-    pub pending_blocks: PendingBlocks,
-}
-
-pub struct ReproduceParams {
-    pub producer_params: ProducerParams,
-    pub expected_results: BTreeMap<EthBlockId, BlockParams>,
-}
-
 #[async_trait]
 pub trait EthereumBlockStorage: Send + Sync {
+    /// Retrieves pending blocks that are not yet not produced (has no blockhashes/numbers).
+    async fn get_pending_blocks(&self) -> ProgramResult<Option<ProducerParams>>;
+
+    /// Used to reproduce blocks based on the provided range of `Slot` values (`from_slot` to `to_slot`).
+    /// Returns reproducible parameters (`ReproduceParams`), which include:
+    ///     - `ProducerParams` for block production.
+    ///     - The expected results (`ProducedBlocks`).
     async fn reproduce_blocks(
         &self,
         from_slot: Slot,
         to_slot: Slot,
     ) -> ProgramResult<Option<ReproduceParams>>;
 
+    /// Accepts parsed block data (`BlockParseResult`) associated with `Slot` values, provided as a `BTreeMap`.
+    /// Stores these results for further processing.
     async fn register_parse_results(
         &self,
         parse_results: BTreeMap<Slot, BlockParseResult>,
-    ) -> ProgramResult<Option<ProducerParams>>;
+    ) -> ProgramResult<()>;
 
+    /// Retrieves the number of the most recently produced block.
     async fn latest_block(&self) -> ProgramResult<Option<U64>>;
 
+    /// Fetches a block number based on its hash (`H256`).
     async fn get_block_number(&self, hash: &H256) -> ProgramResult<Option<U64>>;
 
+    /// Retrieves a block by its number (`U64`).
+    /// If `full_transactions` is `true`, it returns the block along with full transaction details (`Block<Transaction>`).
+    /// If `false`, it returns a block with only transaction hashes (`Block<TxHash>`).
     async fn get_block_by_number(
         &self,
         number: U64,
         full_transactions: bool,
     ) -> ProgramResult<Option<BlockType>>;
 
+    /// Registers blocks that have been produced, based on `ProducerParams` and the resulting `ProducedBlocks`.
     async fn blocks_produced(
         &self,
         producer_params: &ProducerParams,
         produced_blocks: ProducedBlocks,
     ) -> ProgramResult<()>;
 
-    fn chain(&self) -> u64;
-
-    // Returns slot number of the latest slot which contains produced block(s)
-    // or None if no blocks yet being produced
+    /// Returns the latest `Slot` value containing produced blocks.
+    /// If no blocks have been produced yet, it returns `None`.
     async fn get_max_slot_produced(&self) -> ProgramResult<Option<Slot>>;
 
+    /// Keeps only the blocks starting from the specified `Slot`. Blocks with lesser slot values are discarded.
     async fn retain_from_slot(&self, from_slot: Slot) -> ProgramResult<()>;
 
+    /// Fetches the receipt of a transaction given its hash (`TxHash`).
     async fn get_transaction_receipt(
         &self,
         tx_hash: &TxHash,
     ) -> ProgramResult<Option<TransactionReceipt>>;
 
+    /// Retrieves full transaction details for a specific hash (`TxHash`).
     async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<Transaction>>;
 
+    /// Maps an Ethereum block number (`U64`) to its corresponding Solana `Slot`.
     async fn get_slot_for_eth_block(&self, block_number: U64) -> ProgramResult<Option<Slot>>;
 
+    /// Cleans or removes data starting from the given `Slot`.
+    /// This method removes data for higher slots opposite to retain_from_slot
     async fn clean_from_slot(&self, from_slot: Slot) -> ProgramResult<()>;
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ReceiptParams {
-    pub blockhash: H256,
-    pub block_number: U64,
-    pub tx_index: usize,
-    pub block_gas_used: U256,
-    pub first_log_index: U256,
 }

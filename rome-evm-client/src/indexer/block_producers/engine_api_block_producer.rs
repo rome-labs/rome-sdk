@@ -1,14 +1,21 @@
-use crate::engine::GethEngine;
-use async_trait::async_trait;
-use ethers::prelude::{H256, U256, U64};
-use ethers::providers::{Http, Middleware};
-use ethers::types::{BlockId, BlockNumber};
-use rome_evm_client::error::ProgramResult;
-use rome_evm_client::error::RomeEvmError::Custom;
-use rome_evm_client::indexer::{
+use crate::error::RomeEvmError::Custom;
+use crate::error::{ProgramResult, RomeEvmError};
+use crate::indexer::{
     BlockParams, BlockProducer, FinalizedBlock, ProducedBlocks, ProducerParams, ProductionResult,
 };
+use async_trait::async_trait;
+use ethers::prelude::{H256, U64};
+use ethers::providers::{Http, Middleware};
+use ethers::types::{BlockId, BlockNumber};
+use rome_geth::engine::config::GethEngineConfig;
+use rome_geth::engine::{GethEngine, StateAdvanceTx};
 use std::sync::Arc;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct EngineAPIBlockProducerConfig {
+    pub geth_engine: GethEngineConfig,
+    pub geth_api: String,
+}
 
 #[derive(Clone)]
 pub struct EngineAPIBlockProducer {
@@ -48,6 +55,19 @@ impl EngineAPIBlockProducer {
         } else {
             Err(Custom("Failed to get latest block".to_string()))
         }
+    }
+}
+
+impl TryFrom<&EngineAPIBlockProducerConfig> for EngineAPIBlockProducer {
+    type Error = RomeEvmError;
+
+    fn try_from(config: &EngineAPIBlockProducerConfig) -> ProgramResult<Self> {
+        Ok(EngineAPIBlockProducer::new(
+            Arc::new(GethEngine::new(&config.geth_engine)),
+            ethers::providers::Provider::<Http>::try_from(&config.geth_api).map_err(|e| {
+                RomeEvmError::Custom(format!("Failed to create EngineAPIBlockProducer: {:?}", e))
+            })?,
+        ))
     }
 }
 
@@ -142,16 +162,13 @@ impl BlockProducer for EngineAPIBlockProducer {
 
         if let Some(blockhash) = parent_block.hash {
             let mut parent_hash = blockhash;
-            let mut produced_blocks = ProducedBlocks::new();
+            let mut produced_blocks = ProducedBlocks::default();
 
-            for (block_id, pending_block) in &producer_params.pending_blocks {
-                let adjusted_timestamp = pending_block
-                    .slot_timestamp
-                    .map(|v| U256::from(v))
-                    .unwrap_or(parent_block.timestamp);
-
+            for (slot_number, pending_l1_block, block_idx, pending_l2_block) in
+                producer_params.pending_blocks.iter()
+            {
                 let finalize_new_block = if let Some(next_finalized) = next_finalized {
-                    next_finalized >= block_id
+                    next_finalized.ge(&(*slot_number, *block_idx))
                 } else {
                     false
                 };
@@ -161,19 +178,38 @@ impl BlockProducer for EngineAPIBlockProducer {
                     .advance_rollup_state(
                         current_finalized,
                         parent_hash,
-                        adjusted_timestamp,
-                        pending_block,
+                        pending_l1_block.timestamp,
+                        pending_l2_block
+                            .transactions
+                            .values()
+                            .map(|(tx, tx_result)| StateAdvanceTx {
+                                rlp: tx.rlp().to_string(),
+                                gas_price: tx.gas_price.map(|v| v.as_u64()).unwrap_or_default(),
+                                gas_used: tx_result.gas_report.gas_value.as_u64(),
+                            })
+                            .collect(),
+                        pending_l2_block.gas_recipient,
                         finalize_new_block,
                     )
                     .await
                 {
-                    Ok(res) => {
-                        parent_hash = res.hash;
+                    Ok((block_number, block_hash)) => {
+                        produced_blocks.insert(
+                            *slot_number,
+                            *block_idx,
+                            BlockParams {
+                                hash: block_hash,
+                                parent_hash: Some(parent_hash),
+                                number: block_number,
+                                timestamp: pending_l1_block.timestamp,
+                            },
+                        );
+
+                        parent_hash = block_hash;
                         if finalize_new_block {
-                            current_finalized = res.hash;
+                            current_finalized = block_hash;
                         }
 
-                        produced_blocks.insert(*block_id, res);
                         if let Some(limit) = limit {
                             if produced_blocks.len() >= limit {
                                 break;
@@ -184,7 +220,8 @@ impl BlockProducer for EngineAPIBlockProducer {
                         return Err(Custom(format!(
                             "Failed to produce block in op-geth. {:?}: {:?}\n\
                             Take a look at op-geth logs for details.",
-                            block_id, err
+                            (slot_number, block_idx),
+                            err
                         )))
                     }
                 }

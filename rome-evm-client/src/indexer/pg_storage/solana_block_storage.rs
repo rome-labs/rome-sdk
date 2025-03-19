@@ -43,18 +43,24 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
     ) -> ProgramResult<()> {
         self.pool.get()?.transaction(|conn| {
             for (slot_number, block) in blocks {
+                assert!(block.block_time.is_some());
+
                 let slot_status = if slot_number <= finalized_slot {
                     "Finalized"
                 } else {
                     "Confirmed"
                 };
 
-                diesel::sql_query("CALL set_block_with_status($1, $2, $3, $4::slotstatus);")
-                    .bind::<sql_types::BigInt, _>(slot_number as i64)
-                    .bind::<sql_types::BigInt, _>(block.parent_slot as i64)
-                    .bind::<sql_types::Bytea, _>(serde_json::to_vec(&block)?)
-                    .bind::<sql_types::Text, _>(slot_status)
-                    .execute(conn)?;
+                diesel::sql_query(
+                    "CALL set_block_with_status2($1, $2, $3, $4::slotstatus, $5, $6);",
+                )
+                .bind::<sql_types::BigInt, _>(slot_number as i64)
+                .bind::<sql_types::BigInt, _>(block.parent_slot as i64)
+                .bind::<sql_types::Bytea, _>(serde_json::to_vec(&block)?)
+                .bind::<sql_types::Text, _>(slot_status)
+                .bind::<sql_types::Text, _>(block.blockhash.clone())
+                .bind::<sql_types::BigInt, _>(block.block_time.unwrap())
+                .execute(conn)?;
             }
 
             Ok(())
@@ -67,10 +73,12 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
     ) -> ProgramResult<()> {
         self.pool.get()?.transaction(|conn| {
             for (slot_number, block) in blocks {
-                diesel::sql_query("CALL update_finalized_block($1, $2, $3);")
+                diesel::sql_query("CALL update_finalized_block2($1, $2, $3, $4, $5);")
                     .bind::<sql_types::BigInt, _>(slot_number as i64)
                     .bind::<sql_types::BigInt, _>(block.parent_slot as i64)
                     .bind::<sql_types::Bytea, _>(serde_json::to_vec(&block)?)
+                    .bind::<sql_types::Text, _>(block.blockhash.clone())
+                    .bind::<sql_types::Text, _>(block.previous_blockhash.clone())
                     .execute(conn)?;
             }
 

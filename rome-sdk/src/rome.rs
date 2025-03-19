@@ -190,9 +190,6 @@ impl Rome {
             ComputeBudgetInstruction::request_heap_frame(256 * 1024),
         ];
         let mut resource: Option<Resource> = None;
-        let mut vm_steps_executed = 0;
-        let mut emulation_allocated = 0;
-        let mut emulation_syscalls = 0;
 
         for tx in _tx.iter() {
             println!("Transaction {:?}", tx);
@@ -209,30 +206,16 @@ impl Rome {
             data.append(&mut resource.as_ref().unwrap().fee_recipient());
             data.extend_from_slice(rlp.as_ref());
             let emulation = builder.emulate(&data, &resource.as_ref().unwrap().payer_key())?;
-            let vm = emulation.vm.as_ref().expect("Vm expected");
 
-            vm_steps_executed += vm.steps_executed;
-            emulation_allocated += emulation.allocated;
-            emulation_syscalls += emulation.syscalls;
+            if !emulation.is_atomic {
+                return Err(RomeEvmError::Custom(
+                    "Transaction is too large or expensive".to_string(),
+                ));
+            }
 
             let ix = builder.build_ix(&emulation, data);
             println!("Instruction {:?}", ix);
             instructions.push(ix);
-        }
-
-        println!(
-            "VM steps executed: {}, allocated: {}, syscalls: {}",
-            vm_steps_executed, emulation_allocated, emulation_syscalls
-        );
-
-        let is_atomic_tx = vm_steps_executed <= 500 // NUMBER_OPCODES_PER_TX
-            && emulation_allocated <= 1_024 * 10 // MAX_PERMITTED_DATA_INCREASE
-            && emulation_syscalls < 64;
-
-        if !is_atomic_tx {
-            return Err(RomeEvmError::Custom(
-                "Transaction is too large or expensive".to_string(),
-            ));
         }
 
         let resource = resource.ok_or_else(|| {
@@ -258,9 +241,6 @@ impl Rome {
             ComputeBudgetInstruction::request_heap_frame(256 * 1024),
         ];
         let mut resource: Option<Resource> = None;
-        let mut vm_steps_executed = 0;
-        let mut emulation_allocated = 0;
-        let mut emulation_syscalls = 0;
 
         for tx in romulus_tx.eth_txs().iter() {
             println!("Eth Transaction {:?}", tx);
@@ -277,12 +257,12 @@ impl Rome {
             data.append(&mut resource.as_ref().unwrap().fee_recipient());
             data.extend_from_slice(rlp.as_ref());
             let emulation = builder.emulate(&data, &resource.as_ref().unwrap().payer_key())?;
-            let vm = emulation.vm.as_ref().expect("Vm expected");
 
-            vm_steps_executed += vm.steps_executed;
-            emulation_allocated += emulation.allocated;
-            emulation_syscalls += emulation.syscalls;
-
+            if !emulation.is_atomic {
+                return Err(RomeEvmError::Custom(
+                    "Transaction is too large or expensive".to_string(),
+                ));
+            }
             let ix = builder.build_ix(&emulation, data);
             println!("Instruction {:?}", ix);
             instructions.push(ix);
@@ -291,21 +271,6 @@ impl Rome {
             println!("Sol Instruction {:?}", ix);
 
             instructions.push(ix.clone());
-        }
-
-        println!(
-            "VM steps executed: {}, allocated: {}, syscalls: {}",
-            vm_steps_executed, emulation_allocated, emulation_syscalls
-        );
-
-        let is_atomic_tx = vm_steps_executed <= 500 // NUMBER_OPCODES_PER_TX
-                && emulation_allocated <= 1_024 * 10 // MAX_PERMITTED_DATA_INCREASE
-                && emulation_syscalls < 64;
-
-        if !is_atomic_tx {
-            return Err(RomeEvmError::Custom(
-                "Transaction is too large or expensive".to_string(),
-            ));
         }
 
         let resource = resource.ok_or_else(|| {
