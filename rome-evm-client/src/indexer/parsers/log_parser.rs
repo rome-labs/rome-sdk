@@ -5,7 +5,7 @@ use ethers::{
     utils::hex,
 };
 use rome_evm::{
-    EVENT_LOG, EXIT_REASON, GAS_RECIPIENT, GAS_VALUE, H160, REVERT_ERROR, REVERT_PANIC,
+    EVENT_LOG, EXIT_REASON, GAS_PRICE, GAS_RECIPIENT, GAS_VALUE, H160, REVERT_ERROR, REVERT_PANIC,
 };
 use serde::{Deserialize, Serialize};
 use std::mem::size_of;
@@ -48,8 +48,10 @@ pub enum GasReportState {
     Init,
     GasValue,
     GasRecipient,
+    GasPrice,
     GasValueFound,
     GasRecipientFound,
+    GasPriceFound,
 }
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -76,6 +78,7 @@ pub struct LogParser {
     pub events: Vec<Log>,
     pub exit_reason: Option<ExitReason>,
     pub gas_value: Option<U256>,
+    pub gas_price: Option<U256>,
     pub gas_recipient: Option<Address>,
 }
 
@@ -85,6 +88,7 @@ impl LogParser {
             events: vec![],
             exit_reason: None,
             gas_value: None,
+            gas_price: None,
             gas_recipient: None,
         }
     }
@@ -94,11 +98,13 @@ impl LogParser {
             let mut event_parser = EventParser::default();
             let mut reason_parser = ExitReasonParser::default();
             let mut gas_value_parser = GasValueParser::default();
+            let mut gas_price_parser = GasPriceParser::default();
             let mut gas_recipient_parser = GasRecipientParser::default();
 
             event_parser.consume(log)?;
             reason_parser.consume(log)?;
             gas_value_parser.consume(log)?;
+            gas_price_parser.consume(log)?;
             gas_recipient_parser.consume(log)?;
 
             if event_parser.found() {
@@ -109,6 +115,9 @@ impl LogParser {
             }
             if gas_value_parser.found() {
                 self.gas_value = Some(gas_value_parser.gas_value)
+            }
+            if gas_price_parser.found() {
+                self.gas_price = Some(gas_price_parser.gas_price)
             }
             if gas_recipient_parser.found() {
                 self.gas_recipient = gas_recipient_parser.recipient
@@ -360,5 +369,45 @@ impl Parser for GasRecipientParser {
 
     fn found(&self) -> bool {
         self.state == GasReportState::GasRecipientFound
+    }
+}
+
+pub struct GasPriceParser {
+    pub state: GasReportState,
+    pub gas_price: U256,
+}
+
+impl Default for GasPriceParser {
+    fn default() -> Self {
+        Self {
+            state: GasReportState::Init,
+            gas_price: U256::zero(),
+        }
+    }
+}
+
+impl Parser for GasPriceParser {
+    fn advance(&mut self, item: Vec<u8>) -> ProgramResult<()> {
+        match self.state {
+            GasReportState::Init => {
+                if item == GAS_PRICE {
+                    self.state = GasReportState::GasPrice;
+                }
+            }
+            GasReportState::GasPrice => {
+                if item.len() != 32 {
+                    return Err(LogParserError("Gas price: U256 expected".to_string()));
+                };
+                self.gas_price = U256::from_big_endian(item.as_slice());
+                self.state = GasReportState::GasPriceFound;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn found(&self) -> bool {
+        self.state == GasReportState::GasPriceFound
     }
 }

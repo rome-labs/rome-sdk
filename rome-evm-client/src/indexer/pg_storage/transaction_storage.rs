@@ -44,6 +44,7 @@ struct TransactionRow {
     receipt_params: Option<serde_json::Value>,
 }
 
+#[tracing::instrument(name = "pg_storage::new_receipt", skip(tx_result, receipt_params), fields(tx_hash = ?tx.hash))]
 fn new_receipt(
     tx: &Transaction,
     tx_result: TxResult,
@@ -92,13 +93,7 @@ fn new_receipt(
         status: Some(U64::from((tx_result.exit_reason.code == 0) as u64)),
         logs_bloom: Bloom::default(),
         root: None,
-        effective_gas_price: if let Some(price) = tx.gas_price {
-            Some(price)
-        } else if let Some(price) = tx.max_priority_fee_per_gas {
-            Some(price)
-        } else {
-            panic!("No gas_price nor max_priority_fee_per_gas defined")
-        },
+        effective_gas_price: Some(tx_result.gas_report.gas_price),
         deposit_nonce: None,
         l1_fee: None,
         l1_fee_scalar: None,
@@ -109,6 +104,7 @@ fn new_receipt(
 }
 
 impl TransactionStorage {
+    #[tracing::instrument(name = "pg_storage::register_parse_results", skip(self, parse_result))]
     pub async fn register_parse_results(
         &self,
         parse_result: &BTreeMap<Slot, BlockParseResult>,
@@ -138,12 +134,14 @@ impl TransactionStorage {
         })
     }
 
+    #[tracing::instrument(name = "pg_storage::get_transaction_internal", skip(self), fields(tx_hash = ?tx_hash))]
     fn get_transaction_internal(&self, tx_hash: &TxHash) -> ProgramResult<Vec<TransactionRow>> {
         Ok(diesel::sql_query("SELECT * FROM get_transaction($1)")
             .bind::<Text, _>(format!("0x{:x}", tx_hash))
             .load(&mut self.pool.get()?)?)
     }
 
+    #[tracing::instrument(name = "pg_storage::get_transaction_receipt", skip(self), fields(tx_hash = ?tx_hash))]
     pub async fn get_transaction_receipt(
         &self,
         tx_hash: &TxHash,
@@ -173,6 +171,7 @@ impl TransactionStorage {
         Ok(results.last_key_value().map(|(_, receipt)| receipt.clone()))
     }
 
+    #[tracing::instrument(name = "pg_storage::get_transaction", skip(self), fields(tx_hash = ?tx_hash))]
     pub async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<Transaction>> {
         let rows = self.get_transaction_internal(tx_hash)?;
         let mut tx = None;
@@ -200,6 +199,10 @@ impl TransactionStorage {
         Ok(results.last_key_value().map(|(_, tx)| tx.clone()))
     }
 
+    #[tracing::instrument(
+        name = "pg_storage::blocks_produced",
+        skip(self, pending_blocks, produced_blocks)
+    )]
     pub async fn blocks_produced(
         &self,
         pending_blocks: &PendingBlocks,

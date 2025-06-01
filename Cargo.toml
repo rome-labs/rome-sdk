@@ -1,5 +1,5 @@
 [workspace]
-members = ["rome-sdk", "rome-solana", "rome-utils", "rome-geth", "rome-evm-client", "rome-da"]
+members = ["rome-sdk", "rome-solana", "rome-utils", "rome-geth", "rome-evm-client", "rome-da", "rome-obs"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -19,7 +19,7 @@ tokio-tungstenite = "0.23.1"
 async-trait = "0.1.81"
 tokio-util = "0.7.11"
 jsonwebtoken = "9.3.0"
-# time
+# Time
 chrono = { version = "0.4.38", features = ["serde"] }
 # Serialization and deserialization
 serde = { version = "1.0.204", features = ["derive"] }
@@ -32,24 +32,28 @@ bincode = "1.3.3"
 base64 = "0.12.3"
 borsh = "0.9.3"
 borsh-derive = "0.9.3"
-# evm
+# Evm
 ethnum = { version = "1.5.0", default-features = false, features = ["serde"] }
-# not using latest due to rome-rollup-program
+# Not using latest due to rome-rollup-program
 solana-sdk = "2.1.7"
 solana-client = "2.1.7"
 solana-program = "2.1.7"
 solana-transaction-status = "2.1.7"
 solana-rpc-client-api = "2.1.7"
 solana-quic-client = "2.1.7"
-# kafka
+# Kafka
 kafka = "0.10.0"
-# compression (emulator client)
+# Compression (emulator client)
 flate2 = "1.0.30"
-# self dependencies
+# Self dependencies
 rome-solana = { path = "rome-solana" }
 rome-utils = { path = "rome-utils" }
 rome-geth = { path = "rome-geth" }
 rome-evm-client = { path = "rome-evm-client" }
+# Rome Relayer
+api = { path = "../rome-relayer/lib/api" }
+tonic = "0.13.0" 
+moka = "0.12.10"
 # Other utilities
 futures-util = { version = "0.3.30", features = ["sink", "tokio-io"] }
 futures = "0.3.30"
@@ -63,15 +67,16 @@ sha3 = "0.10.1"
 diesel = { version = "2.2.4", features = ["postgres", "r2d2", "serde_json"] }
 diesel-derive-enum = {  version = "2.1.0", features = ["postgres"] }
 r2d2 = "0.8.10"
-
-# ethers
+# Otel 
+opentelemetry = "0.22.0"
+opentelemetry-otlp = "0.15.0"
+opentelemetry_sdk = "0.22.1"
+# Tracing 
+tracing-opentelemetry = "0.23.0"
+# Ethers
 ethers = "2.0.14"
 rome-evm = { path = "../rome-evm/program" }
 emulator = { path = "../rome-evm/emulator" }
-
-[patch.crates-io.aes-gcm-siv]
-git = "https://github.com/RustCrypto/AEADs"
-rev = "6105d7a5591aefa646a95d12b5e8d3f55a9214ef"
 
 [patch.crates-io.curve25519-dalek]
 git ="https://github.com/block-mesh/curve25519-dalek"

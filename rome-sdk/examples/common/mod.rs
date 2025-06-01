@@ -90,7 +90,5 @@ pub fn construct_solana_transfer_ix(sender: &Keypair) -> Instruction {
     let recipient = Pubkey::new_unique();
     let lamports = 1_000_000; // 0.001 SOL
 
-    let transfer_instruction = system_instruction::transfer(&sender.pubkey(), &recipient, lamports);
-
-    transfer_instruction
+    system_instruction::transfer(&sender.pubkey(), &recipient, lamports)
 }

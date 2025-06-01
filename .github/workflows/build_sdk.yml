@@ -12,6 +12,10 @@ on:
         default: 'main'
 env:
   REF_NAME: ${{github.ref_name}}
+  
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.job }}
+  cancel-in-progress: true 
 
 jobs:
   build:
@@ -44,6 +48,13 @@ jobs:
           repository: rome-labs/rome-evm
           path: rome-evm
           ref: ${{ env.evm_branch_name }}
+          token: ${{ secrets.GIT_ROLLUP_TOKEN }}
+
+      - name: 'Checkout Relayer repository'
+        uses: actions/checkout@master
+        with:
+          repository: rome-labs/rome-relayer
+          path: rome-relayer
           token: ${{ secrets.GIT_ROLLUP_TOKEN }}
 
       - name: 'Build rome-sdk'

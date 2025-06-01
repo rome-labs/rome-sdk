@@ -36,6 +36,7 @@ struct FinalizedSlotRow {
 
 #[async_trait]
 impl indexer::SolanaBlockStorage for SolanaBlockStorage {
+    #[tracing::instrument(name = "pg_storage::store_blocks", skip(self))]
     async fn store_blocks(
         &self,
         blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
@@ -67,6 +68,7 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
         })
     }
 
+    #[tracing::instrument(name = "pg_storage::update_finalized_blocks", skip(self))]
     async fn update_finalized_blocks(
         &self,
         blocks: BTreeMap<Slot, Arc<UiConfirmedBlock>>,
@@ -86,6 +88,7 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
         })
     }
 
+    #[tracing::instrument(name = "pg_storage::get_block", skip(self), fields(slot = ?slot_number))]
     async fn get_block(&self, slot_number: Slot) -> ProgramResult<Option<Arc<UiConfirmedBlock>>> {
         Ok(
             if let Some(value) = diesel::select(get_block(slot_number as i64))
@@ -104,12 +107,14 @@ impl indexer::SolanaBlockStorage for SolanaBlockStorage {
         Ok(())
     }
 
+    #[tracing::instrument(name = "pg_storage::get_last_slot", skip(self))]
     async fn get_last_slot(&self) -> ProgramResult<Option<Slot>> {
         Ok(diesel::select(get_last_slot())
             .get_result::<Option<i64>>(&mut self.pool.get()?)?
             .map(|v| v as Slot))
     }
 
+    #[tracing::instrument(name = "pg_storage::set_finalized_slot", skip(self), fields(slot = ?slot))]
     async fn set_finalized_slot(
         &self,
         slot: Slot,

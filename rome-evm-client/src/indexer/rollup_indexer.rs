@@ -2,7 +2,7 @@ use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
 use crate::indexer::block_producers::block_producer::BlockProducer;
 use crate::indexer::ethereum_block_storage::{ProducerParams, ReproduceParams};
-use crate::indexer::parsers::tx_parser::TxParser;
+use crate::indexer::parsers::{default_tx_parser::DefaultTxParser, TxParser};
 use crate::indexer::produced_blocks::{BlockParams, ProducedBlocks};
 use crate::indexer::{BlockParseResult, BlockParser, EthereumBlockStorage, SolanaBlockStorage};
 use ethers::types::U64;
@@ -19,7 +19,7 @@ const BATCH_SIZE: usize = 1024;
 const NUM_RETRIES: usize = 500;
 
 pub struct RollupIndexer {
-    tx_parser: Arc<RwLock<TxParser>>,
+    tx_parser: Arc<RwLock<DefaultTxParser>>,
     block_parser: Arc<RwLock<BlockParser>>,
     solana_block_storage: Arc<dyn SolanaBlockStorage>,
     ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
@@ -36,7 +36,7 @@ impl RollupIndexer {
         max_slot_history: Option<Slot>,
     ) -> Self {
         Self {
-            tx_parser: Arc::new(RwLock::new(TxParser::new())),
+            tx_parser: Arc::new(RwLock::new(DefaultTxParser::new())),
             block_parser,
             solana_block_storage,
             ethereum_block_storage,
@@ -104,6 +104,7 @@ impl RollupIndexer {
         })
     }
 
+    #[tracing::instrument(name = "rollup_indexer::reproduce_blocks_until_in_sync", skip(self), fields(height = ?last_known_block, batch_size = ?batch_size))]
     async fn reproduce_blocks_until_in_sync(
         &self,
         last_known_block: U64,
@@ -228,6 +229,7 @@ impl RollupIndexer {
         }
     }
 
+    #[tracing::instrument(name = "rollup_indexer::restore_or_produce_until_in_sync", skip(self), fields(from_slot = ?from_slot, batch_size = ?batch_size))]
     async fn restore_or_produce_until_in_sync(
         &self,
         from_slot: Slot,
@@ -265,6 +267,7 @@ impl RollupIndexer {
         })
     }
 
+    #[tracing::instrument(name = "rollup_indexer::parse_blocks_batch", skip(self), fields(from_slot = ?from_slot, max_slot = ?max_slot, batch_size = ?batch_size))]
     async fn parse_blocks_batch(
         &self,
         from_slot: Slot,
@@ -293,6 +296,7 @@ impl RollupIndexer {
         Ok((to_slot, parse_results))
     }
 
+    #[tracing::instrument(name = "rollup_indexer::retain_storages", skip(self), fields(before_slot = ?before_slot))]
     async fn retain_storages(&self, before_slot: Slot) {
         if let Some(max_slot_history) = self.max_slot_history {
             let keep_slots = std::cmp::max(MAX_PARSE_BEHIND, max_slot_history);
@@ -370,6 +374,7 @@ impl RollupIndexer {
         Ok(())
     }
 
+    #[tracing::instrument(name = "rollup_indexer::restore_blocks", skip(self, producer_params), fields(from_block = ?from_block, to_block = ?to_block))]
     async fn restore_blocks(
         &self,
         from_block: U64,
@@ -407,6 +412,7 @@ impl RollupIndexer {
         Ok(())
     }
 
+    #[tracing::instrument(name = "rollup_indexer::get_blocks_params", skip(self), fields(from_block = ?from_block, to_block = ?to_block))]
     async fn get_blocks_params(
         &self,
         from_block: U64,

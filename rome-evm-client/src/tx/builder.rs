@@ -144,7 +144,7 @@ impl TxBuilder {
         }
     }
 
-    /// Build a Solapayerna instruction from [Emulation] and data
+    /// Build a Solana instruction from [Emulation] and data
     pub fn build_ix(&self, emulation: &Emulation, data: Vec<u8>) -> Instruction {
         let accounts = emulation
             .accounts
@@ -152,7 +152,7 @@ impl TxBuilder {
             .map(|(pubkey, item)| AccountMeta {
                 pubkey: *pubkey,
                 is_signer: false,
-                is_writable: item.account.writeable,
+                is_writable: item.account.writable,
             })
             .collect::<Vec<AccountMeta>>();
 

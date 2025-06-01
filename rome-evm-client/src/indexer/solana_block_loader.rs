@@ -1,9 +1,8 @@
 use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
+use crate::indexer::solana_client::{GetConfirmedSignaturesForAddress2ConfigClone, SolanaClient};
 use crate::indexer::SolanaBlockStorage;
-use rome_solana::types::AsyncAtomicRpcClient;
 use solana_client::client_error::ClientError;
-use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_program::clock::Slot;
 use solana_program::pubkey::Pubkey;
 use solana_rpc_client_api::client_error::ErrorKind;
@@ -23,9 +22,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use tokio::task::JoinHandle;
 
+type ArcSolanaClient = Arc<dyn SolanaClient>;
+
 pub struct SolanaBlockLoader {
     pub solana_block_storage: Arc<dyn SolanaBlockStorage>,
-    pub client: AsyncAtomicRpcClient,
+    pub client: ArcSolanaClient,
     pub commitment: CommitmentLevel,
     pub program_id: Pubkey,
     pub batch_size: Slot,
@@ -36,7 +37,7 @@ pub struct SolanaBlockLoader {
 
 #[tracing::instrument(skip(client))]
 async fn load_transaction(
-    client: &AsyncAtomicRpcClient,
+    client: &ArcSolanaClient,
     program_id: Pubkey,
     signature: Signature,
     commitment: CommitmentLevel,
@@ -95,7 +96,7 @@ async fn load_transaction(
 }
 
 async fn load_transaction_with_retries(
-    client: AsyncAtomicRpcClient,
+    client: ArcSolanaClient,
     commitment: CommitmentLevel,
     program_id: Pubkey,
     signature: Signature,
@@ -122,7 +123,7 @@ async fn load_transaction_with_retries(
 }
 
 async fn load_transactions(
-    client: AsyncAtomicRpcClient,
+    client: ArcSolanaClient,
     commitment: CommitmentLevel,
     program_id: Pubkey,
     signatures: Vec<Signature>,
@@ -157,7 +158,7 @@ async fn load_transactions(
 }
 
 async fn load_block_transactions(
-    client: AsyncAtomicRpcClient,
+    client: ArcSolanaClient,
     program_id: Pubkey,
     mut block: UiConfirmedBlock,
     commitment: CommitmentLevel,
@@ -185,7 +186,7 @@ async fn load_block_transactions(
                 client
                     .get_signatures_for_address_with_config(
                         &program_id,
-                        GetConfirmedSignaturesForAddress2Config {
+                        GetConfirmedSignaturesForAddress2ConfigClone {
                             commitment: Some(CommitmentConfig { commitment }),
                             before: Some(before),
                             until: Some(until),
@@ -217,7 +218,7 @@ async fn load_block_transactions(
 }
 
 async fn load_block(
-    client: AsyncAtomicRpcClient,
+    client: ArcSolanaClient,
     commitment: CommitmentLevel,
     program_id: Pubkey,
     slot_number: Slot,
@@ -289,7 +290,10 @@ impl SolanaBlockLoader {
                 .iter()
                 .zip(futures_util::future::join_all(futures).await.into_iter())
                 .filter_map(|(slot, result)| match result {
-                    Err(_) => Some(*slot),
+                    Err(err) => {
+                        tracing::info!("Failed to load block on slot {:?}: {:?}", slot, err);
+                        Some(*slot)
+                    }
                     Ok(Some(block)) => {
                         results.insert(*slot, block);
                         None

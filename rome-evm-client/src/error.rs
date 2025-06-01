@@ -1,5 +1,6 @@
 use ethers::types::SignatureError;
 use rlp::DecoderError;
+use tonic::transport::Error as TransportError;
 use {
     ethers::types::transaction::request::RequestError, rome_evm::error::RomeProgramError,
     solana_client::client_error::ClientError, std::sync::PoisonError, thiserror::Error,
@@ -63,6 +64,9 @@ pub enum RomeEvmError {
     #[error("Connection pool error: {0}")]
     ConnectionPoolError(r2d2::Error),
 
+    #[error("Grpc Transport error: {0}")]
+    TransportError(TransportError),
+
     #[error("RLP Decoder error: {0}")]
     TxDecodeError(DecoderError),
 
@@ -74,6 +78,12 @@ pub enum RomeEvmError {
 
     #[error("Ethers provider error: {0}")]
     EthersProviderError(ethers::providers::ProviderError),
+
+    #[error("Relayer error: {0}")]
+    RelayerError(tonic::Status),
+
+    #[error("Error converting slot: {0}")]
+    InvalidSlot(std::num::TryFromIntError),
 }
 
 impl From<ClientError> for RomeEvmError {

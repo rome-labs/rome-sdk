@@ -3,13 +3,16 @@ pub mod config;
 mod ethereum_block_storage;
 pub mod inmemory;
 mod metrics_reporter;
+mod multiplexed_solana_client;
 pub mod parsers;
 mod pending_blocks;
 pub mod pg_storage;
 mod produced_blocks;
+pub mod relayer;
 pub mod rollup_indexer;
 mod solana_block_loader;
 mod solana_block_storage;
+mod solana_client;
 mod standalone_indexer;
 
 pub use crate::error::ProgramResult;
@@ -21,6 +24,7 @@ pub use ethereum_block_storage::{
 use ethers::addressbook::Address;
 use ethers::prelude::{H256, U256};
 pub use metrics_reporter::MetricsReporter;
+pub use multiplexed_solana_client::MultiplexedSolanaClient;
 pub use parsers::block_parser::{BlockParseResult, BlockParser, TxResult};
 pub use pending_blocks::PendingBlocks;
 pub use pending_blocks::PendingL2Block;
@@ -113,6 +117,7 @@ pub mod test {
             },
             create_result(GasReport {
                 gas_value: gas,
+                gas_price: U256::one(),
                 gas_recipient,
             }),
         )
@@ -170,6 +175,7 @@ pub mod test {
             },
             create_result(GasReport {
                 gas_value: gas,
+                gas_price: U256::one(),
                 gas_recipient,
             }),
         )

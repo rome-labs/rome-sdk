@@ -32,6 +32,12 @@ pub struct Payer {
     resource_type: ResourceType,
 }
 
+impl PayerConfig {
+    pub fn fee_recipients(&self) -> &Option<Vec<Address>> {
+        &self.fee_recipients
+    }
+}
+
 impl Payer {
     pub async fn from_config(cfg: &PayerConfig) -> anyhow::Result<Payer> {
         let solana_payer = SolanaKeyPayer::read_from_file(&cfg.payer_keypair).await?;

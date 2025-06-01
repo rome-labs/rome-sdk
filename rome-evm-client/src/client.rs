@@ -3,7 +3,10 @@ use rome_solana::types::{AsyncAtomicRpcClient, SyncAtomicRpcClient};
 
 use crate::error::RomeEvmError::Custom;
 use crate::error::{ProgramResult, RomeEvmError};
-use crate::indexer::{BlockParams, BlockParser, BlockProducer, ProducedBlocks, ProductionResult};
+use crate::indexer::{
+    BlockParams, BlockParser, BlockProducer, MultiplexedSolanaClient, ProducedBlocks,
+    ProductionResult,
+};
 use crate::indexer::{BlockType, EthereumBlockStorage, ProducerParams};
 use crate::indexer::{RollupIndexer, SolanaBlockLoader, SolanaBlockStorage, StandaloneIndexer};
 use crate::tx::TxBuilder;
@@ -16,11 +19,12 @@ use ethers::types::{
     TransactionReceipt, TransactionRequest, TxHash, H256, U256, U64,
 };
 use ethers::utils::keccak256;
-use rome_evm::OwnerInfo;
+use rome_evm::error::RomeProgramError::AccountNotFound;
+use rome_evm::{state::pda::Pda, OwnerInfo};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     clock::Slot,
-    commitment_config::CommitmentLevel,
+    commitment_config::{CommitmentConfig, CommitmentLevel},
     pubkey::Pubkey,
     signer::{keypair::Keypair, Signer},
     transaction::Transaction,
@@ -36,7 +40,6 @@ const TX_RETRIES: usize = 10;
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Client component interacting with the instance of Rome-EVM smart-contract on Solana blockchain
-/// (Rome-EVM Rollup).
 ///
 /// Interface of RomeEVMClient is designed to be closely compatible with standard Ethereum JSON RPC
 /// and mostly repeats its functionality.
@@ -50,6 +53,8 @@ pub struct RomeEVMClient {
     commitment_level: CommitmentLevel,
 
     genesis_timestamp: U256,
+
+    gas_price: U256,
 }
 
 const INDEXING_INTERVAL_MS: u64 = 400;
@@ -134,6 +139,7 @@ impl RomeEVMClient {
         commitment_level: CommitmentLevel,
         ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
         payers: Vec<Payer>,
+        gas_price: U256,
     ) -> Self {
         let sync_client = Arc::new(RpcClient::new_with_commitment(
             solana.client().url(),
@@ -151,6 +157,7 @@ impl RomeEVMClient {
                     .unwrap()
                     .as_millis(),
             ),
+            gas_price,
         }
     }
 
@@ -163,10 +170,10 @@ impl RomeEVMClient {
         idx_started_oneshot: Option<oneshot::Sender<()>>,
         max_slot_history: Option<Slot>,
         block_loader_batch_size: Slot,
-    ) -> JoinHandle<()> {
+    ) -> JoinHandle<ProgramResult<()>> {
         let solana_block_loader = SolanaBlockLoader {
             solana_block_storage: solana_block_storage.clone(),
-            client: self.solana.client_cloned(),
+            client: Arc::new(MultiplexedSolanaClient::from(self.solana.client_cloned())),
             commitment: self.commitment_level,
             program_id: *self.program_id(),
             batch_size: block_loader_batch_size,
@@ -184,7 +191,7 @@ impl RomeEVMClient {
         );
 
         StandaloneIndexer {
-            solana_block_loader,
+            solana_block_loader: Some(solana_block_loader),
             rollup_indexer,
         }
         .start_indexing(start_slot, idx_started_oneshot, INDEXING_INTERVAL_MS)
@@ -242,8 +249,7 @@ impl RomeEVMClient {
 
     /// Returns current gas price
     pub fn gas_price(&self) -> ProgramResult<U256> {
-        let gas_price = 1;
-        Ok(gas_price.into())
+        Ok(self.gas_price)
     }
 
     /// Executes given transaction request on a current block
@@ -458,28 +464,29 @@ impl RomeEVMClient {
         Ok(U256::from_big_endian(&buf))
     }
 
-    /// Instruction is used to synchronize the initial state of contract with the state of op-geth.
-    /// This private instruction is only available to the rollup owner, which was previously
-    /// registered using the reg_owner instruction.
-    /// It is not possible to overwrite the account state
-    pub async fn create_balance(
-        &self,
-        address: Address,
-        balance: U256,
-        rollup_owner: &Keypair,
-    ) -> ProgramResult<()> {
-        let mut buf = [0; 32];
-        balance.to_big_endian(&mut buf);
-
-        let mut data = vec![Instruction::CreateBalance as u8];
-        data.extend(address.as_bytes());
-        data.extend(buf);
+    /// The instruction is used to deposit funds to the rome-evm balance account.
+    /// The instruction data consists of: chain_id | rlp
+    ///
+    /// Special type 0x7E of rlp is used.
+    /// Rome-evm mints the funds on the user account.
+    /// SOLs are transferred from the solana user's wallet to rome-evm wallet.
+    ///
+    /// Rate: 1 SOL = 1 rome-evm token
+    ///
+    /// The amount in Wei is used as rlp.mint.
+    /// This amount must be multiple of 10^9, because the precision of rome-evm token is 10^18,
+    /// precision of native SOL token is 10^9.
+    ///
+    /// This solana transaction must be signed by solana user's wallet private key.
+    pub async fn deposit(&self, rlp: &[u8], keypair: &Keypair) -> ProgramResult<()> {
+        let mut data = vec![Instruction::Deposit as u8];
         data.extend(self.chain_id().to_le_bytes());
+        data.extend(rlp);
 
         let emulation = emulator::emulate(
             self.program_id(),
             &data,
-            &rollup_owner.pubkey(),
+            &keypair.pubkey(),
             self.sync_rpc_client(),
         )?;
 
@@ -487,8 +494,8 @@ impl RomeEVMClient {
         let blockhash = self.rpc_client().get_latest_blockhash().await?;
         let tx = Transaction::new_signed_with_payer(
             &[ix],
-            Some(&rollup_owner.pubkey()),
-            &[rollup_owner],
+            Some(&keypair.pubkey()),
+            &[keypair],
             blockhash,
         );
         let _ = self.rpc_client().send_and_confirm_transaction(&tx).await?;
@@ -497,18 +504,10 @@ impl RomeEVMClient {
     }
 
     /// Instruction is used to registry rollup owner.
-    /// After the registration the rollup owner is able to init state of the rollup by using
-    /// the create_balance instruction.
     /// This private instruction must be signed with the upgrade-authority keypair that was used
     /// to deploy the rome-evm contract.
-    pub async fn reg_owner(
-        &self,
-        rollup_owner_key: &Pubkey,
-        chain_id: u64,
-        upgrade_authority: &Keypair,
-    ) -> ProgramResult<()> {
+    pub async fn reg_owner(&self, chain_id: u64, upgrade_authority: &Keypair) -> ProgramResult<()> {
         let mut data = vec![Instruction::RegOwner as u8];
-        data.extend(rollup_owner_key.to_bytes());
         data.extend(chain_id.to_le_bytes());
 
         let emulation = emulator::emulate(
@@ -548,5 +547,27 @@ impl RomeEVMClient {
 
     pub async fn get_transaction(&self, tx_hash: &TxHash) -> ProgramResult<Option<EthTransaction>> {
         self.ethereum_block_storage.get_transaction(tx_hash).await
+    }
+
+    pub fn program_sol_wallet(&self) -> Pubkey {
+        let pda = Pda::new_(self.program_id(), self.chain_id());
+        let (key, _) = pda.sol_wallet();
+
+        key
+    }
+    pub async fn solana_balance(&self, key: &Pubkey) -> ProgramResult<u64> {
+        let cfg = CommitmentConfig {
+            commitment: self.commitment_level,
+        };
+
+        let acc = self
+            .solana
+            .client()
+            .get_account_with_commitment(key, cfg)
+            .await?
+            .value
+            .ok_or(AccountNotFound(*key))?;
+
+        Ok(acc.lamports)
     }
 }

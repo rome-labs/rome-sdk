@@ -389,6 +389,7 @@ pub struct EthereumBlockStorage {
 }
 
 impl EthBlock {
+    #[tracing::instrument(name = "pg_storage::store_rollup_header_into_db", skip(self, conn), fields(slot = slot_number))]
     pub fn store_rollup_header_into_db(
         &self,
         slot_number: Slot,
@@ -409,6 +410,7 @@ impl EthBlock {
         Ok(())
     }
 
+    #[tracing::instrument(name = "pg_storage::store_single_state_header_into_db", skip(self, conn, parse_result), fields(slot = slot_number))]
     pub fn store_single_state_header_into_db(
         &self,
         slot_number: Slot,
@@ -444,6 +446,7 @@ impl EthBlock {
         Ok(())
     }
 
+    #[tracing::instrument(name = "pg_storage::store_txs_into_db", skip(self, conn), fields(slot = slot_number))]
     pub fn store_txs_into_db(
         &self,
         slot_number: Slot,
@@ -477,6 +480,7 @@ impl EthereumBlockStorage {
 
 #[async_trait]
 impl crate::indexer::EthereumBlockStorage for EthereumBlockStorage {
+    #[tracing::instrument(name = "pg_storage::get_pending_blocks", skip(self))]
     async fn get_pending_blocks(&self) -> ProgramResult<Option<ProducerParams>> {
         use self::schema::pending_transactions_with_slot_statuses2::dsl::*;
         let mut finalized_blocks = BTreeMap::new();
@@ -535,6 +539,7 @@ impl crate::indexer::EthereumBlockStorage for EthereumBlockStorage {
         }
     }
 
+    #[tracing::instrument(name = "pg_storage::reproduce_blocks", skip(self), fields(from_slot = ?from_slot, to_slot = ?to_slot))]
     async fn reproduce_blocks(
         &self,
         from_slot: Slot,
@@ -578,12 +583,10 @@ impl crate::indexer::EthereumBlockStorage for EthereumBlockStorage {
                 .await?;
 
             self.pool.get()?.transaction(|conn| -> ProgramResult<()> {
-                for (slot_number, parse_result) in &parse_results {
-                    for (block_idx, eth_block) in
-                        parse_result.create_eth_blocks().iter().enumerate()
-                    {
-                        eth_block.store_rollup_header_into_db(*slot_number, block_idx, conn)?;
-                        eth_block.store_txs_into_db(*slot_number, block_idx, conn)?;
+                for (slot_number, parse_result) in parse_results {
+                    for (block_idx, eth_block) in parse_result.eth_blocks.iter().enumerate() {
+                        eth_block.store_rollup_header_into_db(slot_number, block_idx, conn)?;
+                        eth_block.store_txs_into_db(slot_number, block_idx, conn)?;
                     }
                 }
 

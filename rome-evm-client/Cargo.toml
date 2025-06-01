@@ -18,11 +18,17 @@ thiserror = {workspace = true}
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = {workspace = true}
 
-tokio = {workspace = true}
-futures = {workspace = true}
-futures-util = {workspace = true}
+tokio = { workspace = true}
+futures = { workspace = true}
+futures-util = { workspace = true}
+tokio-util = { workspace = true }
 async-trait = { workspace = true }
-jsonrpsee-core = {workspace = true}
+jsonrpsee-core = { workspace = true}
+
+# relayer
+tonic = { workspace = true }
+api = { workspace = true } 
+moka = {  workspace = true, features = ["future"] }
 
 solana-client = {workspace = true}
 solana-program = {workspace = true}
@@ -40,3 +46,5 @@ ethers = { workspace = true, features = ["optimism"] }
 diesel = {workspace = true}
 diesel-derive-enum = {workspace = true}
 r2d2 = {workspace = true}
+
+

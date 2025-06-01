@@ -32,6 +32,10 @@ impl BlockProducer for SingleStateBlockProducer {
         todo!()
     }
 
+    #[tracing::instrument(
+        name = "block_producer::produce_blocks",
+        skip(self, producer_params, limit)
+    )]
     async fn produce_blocks(
         &self,
         producer_params: &ProducerParams,

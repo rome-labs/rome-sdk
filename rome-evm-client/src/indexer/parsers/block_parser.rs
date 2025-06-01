@@ -1,36 +1,33 @@
-use crate::error::RomeEvmError;
-use crate::indexer::parsers::l1_attributes::create_l1_attributes_tx;
-use crate::indexer::parsers::log_parser;
-use crate::indexer::parsers::log_parser::LogParser;
-use crate::indexer::parsers::tx_parser::{
-    decode_transaction_from_rlp, ParsedTxStep, ParsedTxs, TxParser,
-};
-use crate::indexer::produced_blocks::BlockParams;
-use crate::indexer::BlockType;
-use ethers::addressbook::Address;
-use ethers::prelude::{Block, Log, H256};
-use ethers::types::{BigEndianHash, Transaction};
-use jsonrpsee_core::Serialize;
-use serde::Deserialize;
-use solana_sdk::bs58;
 use {
     crate::{
         error::{ProgramResult, RomeEvmError::*},
-        indexer::solana_block_storage::SolanaBlockStorage,
+        indexer::{
+            parsers::{
+                default_tx_parser::decode_transaction_from_rlp,
+                l1_attributes::{create_l1_attributes_tx, update_if_user_deposited_tx},
+                log_parser::{self, LogParser},
+                tx_parser::{ParsedTxStep, ParsedTxs, TxParser},
+            },
+            produced_blocks::BlockParams,
+            solana_block_storage::SolanaBlockStorage,
+            BlockType,
+        },
     },
     emulator::instruction::Instruction::*,
-    ethers::types::{TxHash, U256},
+    ethers::types::{Address, BigEndianHash, Block, Log, Transaction, TxHash, H256, U256},
+    jsonrpsee_core::Serialize,
     rlp::Rlp,
     rome_evm::api::{
-        do_tx_holder, do_tx_holder_iterative, do_tx_iterative, split_fee, transmit_tx,
+        deposit, do_tx_holder, do_tx_holder_iterative, do_tx_iterative, split_fee, transmit_tx,
     },
+    serde::Deserialize,
     solana_program::{clock::UnixTimestamp, instruction::CompiledInstruction},
     solana_sdk::pubkey::Pubkey,
-    solana_sdk::{signature::Signature as SolSignature, slot_history::Slot},
+    solana_sdk::{bs58, signature::Signature as SolSignature, slot_history::Slot},
     solana_transaction_status::{
         option_serializer::OptionSerializer, UiConfirmedBlock, UiTransactionStatusMeta,
     },
-    std::sync::Arc,
+    std::{ops::AddAssign, sync::Arc},
 };
 
 #[derive(Debug)]
@@ -91,6 +88,7 @@ where
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GasReport {
     pub gas_value: U256,
+    pub gas_price: U256,
     pub gas_recipient: Option<Address>,
 }
 
@@ -119,6 +117,21 @@ const EMPTY_ROOT: [u8; 32] = [
 ];
 
 impl EthBlock {
+    pub fn new(
+        timestamp: Option<UnixTimestamp>,
+        transactions: Vec<TxHash>,
+        block_gas_used: U256,
+        gas_recipient: Option<Address>,
+    ) -> Self {
+        Self {
+            block_gas_used,
+            transactions,
+            gas_recipient,
+            slot_timestamp: timestamp,
+            block_params: None,
+        }
+    }
+
     pub fn get_block_base<B>(&self) -> Block<B> {
         let tx_root = if self.transactions.is_empty() {
             H256::from(EMPTY_ROOT)
@@ -154,74 +167,121 @@ pub enum BlockParseMode {
 #[derive(Clone)]
 pub struct BlockParseResult {
     pub slot_number: Slot,
-    pub parent_slot_number: Slot,
-    pub solana_blockhash: String,
-    pub parent_solana_blockhash: String,
+    pub solana_blockhash: H256,
+    pub parent_solana_blockhash: H256,
     pub timestamp: Option<UnixTimestamp>,
     pub transactions: Vec<(Transaction, TxResult)>,
-    pub parse_mode: BlockParseMode,
+    pub eth_blocks: Vec<EthBlock>,
 }
 
 impl BlockParseResult {
-    pub fn new(
+    pub fn new<T: TxParser>(
         slot_number: Slot,
         solana_block: Arc<UiConfirmedBlock>,
-        tx_parser: &TxParser,
+        tx_parser: &mut T,
         parse_mode: BlockParseMode,
+        enable_deposits_slot: Option<Slot>,
     ) -> ProgramResult<Self> {
+        let solana_blockhash = H256::from_slice(
+            &bs58::decode(&solana_block.blockhash)
+                .into_vec()
+                .map_err(|_| {
+                    Custom(format!(
+                        "Solana block {:?} invalid blockhash: {}",
+                        slot_number, solana_block.blockhash
+                    ))
+                })?,
+        );
+
+        let parent_solana_blockhash = H256::from_slice(
+            &bs58::decode(&solana_block.previous_blockhash)
+                .into_vec()
+                .map_err(|_| {
+                    Custom(format!(
+                        "Solana block {:?} invalid parent blockhash: {}",
+                        slot_number, solana_block.previous_blockhash
+                    ))
+                })?,
+        );
+
+        let solana_blocktime = solana_block
+            .block_time
+            .map(U256::from)
+            .ok_or(Custom(format!(
+                "Solana blocktime is not set for {slot_number}"
+            )))?;
+        let mut transactions = Self::parse_transactions(
+            slot_number,
+            &solana_blockhash,
+            &solana_blocktime,
+            enable_deposits_slot,
+            tx_parser,
+        )?;
+
+        let eth_blocks = Self::create_eth_blocks(
+            &solana_blockhash,
+            solana_block.block_time,
+            &mut transactions,
+            parse_mode,
+        );
+
         Ok(Self {
             slot_number,
-            parent_slot_number: solana_block.parent_slot,
-            solana_blockhash: solana_block.blockhash.clone(),
-            parent_solana_blockhash: solana_block.previous_blockhash.clone(),
+            solana_blockhash,
+            parent_solana_blockhash,
             timestamp: solana_block.block_time,
-            parse_mode,
-            transactions: Some(create_l1_attributes_tx(
-                slot_number,
-                H256::from_slice(&bs58::decode(&solana_block.blockhash).into_vec().map_err(
-                    |_| {
-                        RomeEvmError::Custom(format!(
-                            "Solana block {:?} invalid blockhash: {}",
-                            slot_number, solana_block.blockhash
-                        ))
-                    },
-                )?),
-                U256::from(solana_block.block_time.ok_or(RomeEvmError::Custom(format!(
-                    "Solana block {:?} timestamp is not set",
-                    slot_number
-                )))?),
-            ))
-            .into_iter()
-            .chain(tx_parser.finalize_slot(slot_number)?)
-            .collect(),
+            transactions,
+            eth_blocks,
         })
     }
 
-    fn new_eth_block(
-        &self,
-        transactions: Vec<TxHash>,
-        block_gas_used: U256,
-        gas_recipient: Option<Address>,
-    ) -> EthBlock {
-        EthBlock {
-            block_gas_used,
-            transactions,
-            gas_recipient,
-            slot_timestamp: self.timestamp,
-            block_params: None,
+    fn parse_transactions<T: TxParser>(
+        slot_number: Slot,
+        solana_blockhash: &H256,
+        solana_blocktime: &U256,
+        enable_deposits_slot: Option<Slot>,
+        tx_parser: &mut T,
+    ) -> ProgramResult<Vec<(Transaction, TxResult)>> {
+        let parsed_txs = tx_parser.finalize_slot(slot_number)?;
+        if !parsed_txs.is_empty() {
+            tracing::info!("Parsed transactions: {:?}", parsed_txs);
         }
+
+        Ok(if let Some(enable_deposits_slot) = enable_deposits_slot {
+            if slot_number >= enable_deposits_slot {
+                Some(create_l1_attributes_tx(
+                    slot_number,
+                    solana_blockhash,
+                    solana_blocktime,
+                ))
+                .into_iter()
+                .chain(parsed_txs)
+                .collect()
+            } else {
+                parsed_txs
+            }
+        } else {
+            parsed_txs
+        })
     }
 
-    pub fn create_eth_blocks(&self) -> Vec<EthBlock> {
-        match self.parse_mode {
-            BlockParseMode::EngineApi => {
-                let mut block_gas_used = U256::zero();
-                let mut eth_blocks = Vec::new();
+    pub fn create_eth_blocks(
+        solana_blockhash: &H256,
+        timestamp: Option<UnixTimestamp>,
+        transactions: &mut Vec<(Transaction, TxResult)>,
+        parse_mode: BlockParseMode,
+    ) -> Vec<EthBlock> {
+        let mut block_gas_used = U256::zero();
+        let mut eth_blocks = Vec::new();
+        let mut block_txs = Vec::new();
+        let mut gas_recipient = None;
+        let mut block_log_index = U256::zero();
 
-                let mut block_txs = Vec::new();
-                let mut gas_recipient = None;
-
-                for (tx, tx_result) in self.transactions.iter() {
+        for (tx, tx_result) in transactions {
+            update_if_user_deposited_tx(tx, solana_blockhash, block_log_index);
+            block_log_index.add_assign(U256::from(tx_result.logs.len()));
+            match parse_mode {
+                BlockParseMode::EngineApi => {
                     if tx_result.gas_report.gas_recipient == gas_recipient {
                         // Several transactions with the same gas recipient are included in a single block
                         block_txs.push(tx.hash);
@@ -235,7 +295,8 @@ impl BlockParseResult {
                             continue;
                         }
 
-                        eth_blocks.push(self.new_eth_block(
+                        eth_blocks.push(EthBlock::new(
+                            timestamp,
                             block_txs,
                             block_gas_used,
                             gas_recipient,
@@ -243,35 +304,34 @@ impl BlockParseResult {
                         block_txs = vec![tx.hash];
                         block_gas_used = tx_result.gas_report.gas_value;
                         gas_recipient = tx_result.gas_report.gas_recipient;
+                        block_log_index = U256::zero();
                     }
                 }
 
-                if !block_txs.is_empty() {
-                    eth_blocks.push(self.new_eth_block(block_txs, block_gas_used, gas_recipient));
-                }
-
-                eth_blocks
-            }
-
-            BlockParseMode::SingleState => {
-                let mut block_gas_used = U256::zero();
-                let mut block_txs = Vec::new();
-
-                for (tx, tx_result) in self.transactions.iter() {
+                BlockParseMode::SingleState => {
                     block_txs.push(tx.hash);
                     block_gas_used += tx_result.gas_report.gas_value;
                 }
-
-                vec![self.new_eth_block(block_txs, block_gas_used, None)]
             }
         }
+
+        if !block_txs.is_empty() {
+            eth_blocks.push(EthBlock::new(
+                timestamp,
+                block_txs,
+                block_gas_used,
+                gas_recipient,
+            ));
+        }
+
+        eth_blocks
     }
 }
 
-struct SolanaBlockParser<'a> {
+struct SolanaBlockParser<'a, T: TxParser> {
     chain_id: u64,
     parsed_txs: ParsedTxs,
-    tx_parser: &'a mut TxParser,
+    tx_parser: &'a mut T,
     slot_number: Slot,
 }
 
@@ -286,6 +346,7 @@ fn parse_transaction_meta(meta: &UiTransactionStatusMeta) -> ProgramResult<Optio
                     logs: parser.events,
                     gas_report: GasReport {
                         gas_value: parser.gas_value.unwrap_or(U256::zero()),
+                        gas_price: parser.gas_price.unwrap_or(U256::zero()),
                         gas_recipient: parser.gas_recipient,
                     },
                 })
@@ -297,8 +358,8 @@ fn parse_transaction_meta(meta: &UiTransactionStatusMeta) -> ProgramResult<Optio
     })
 }
 
-impl<'a> SolanaBlockParser<'a> {
-    pub fn new(chain_id: u64, tx_parser: &'a mut TxParser, slot_number: Slot) -> Self {
+impl<'a, T: TxParser> SolanaBlockParser<'a, T> {
+    pub fn new(chain_id: u64, tx_parser: &'a mut T, slot_number: Slot) -> Self {
         Self {
             chain_id,
             parsed_txs: ParsedTxs::new(),
@@ -328,6 +389,32 @@ impl<'a> SolanaBlockParser<'a> {
 
         if chain_id == self.chain_id {
             self.add_small_tx(tx_idx, tx, meta)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn process_deposit_tx(
+        &mut self,
+        tx_idx: usize,
+        sol_tx: SolSignature,
+        instr_data: &[u8],
+    ) -> ProgramResult<()> {
+        let (chain_id, rlp) = deposit::args(instr_data).inspect_err(|e| {
+            tracing::warn!("Tx {:?} {}: ", sol_tx, e.to_string());
+        })?;
+
+        if chain_id == self.chain_id {
+            let rlp = Rlp::new(rlp);
+            let tx = decode_transaction_from_rlp(&rlp)?;
+            self.parsed_txs
+                .entry(tx.hash)
+                .or_default()
+                .entry(tx_idx)
+                .or_insert(ParsedTxStep::SmallTx {
+                    tx,
+                    tx_result: Some(TxResult::default()),
+                });
         }
 
         Ok(())
@@ -468,32 +555,19 @@ impl<'a> SolanaBlockParser<'a> {
 }
 
 pub struct BlockParser {
-    solana_block_storage: Arc<dyn SolanaBlockStorage>,
+    pub solana_block_storage: Arc<dyn SolanaBlockStorage>,
     pub program_id: Pubkey,
     pub chain_id: u64,
     pub parse_mode: BlockParseMode,
+    pub enable_deposit_slot: Option<Slot>,
 }
 
 impl BlockParser {
-    pub fn new(
-        solana_block_storage: Arc<dyn SolanaBlockStorage>,
-        program_id: Pubkey,
-        chain_id: u64,
-        parse_mode: BlockParseMode,
-    ) -> Self {
-        BlockParser {
-            solana_block_storage,
-            program_id,
-            chain_id,
-            parse_mode,
-        }
-    }
-
-    fn register_block(
+    fn register_block<T: TxParser>(
         &self,
         slot_number: Slot,
         solana_block: Arc<UiConfirmedBlock>,
-        tx_parser: &mut TxParser,
+        tx_parser: &mut T,
     ) {
         let mut sol_bp = SolanaBlockParser::new(self.chain_id, tx_parser, slot_number);
 
@@ -522,6 +596,9 @@ impl BlockParser {
                     instr_data,
                     entry.meta,
                 ),
+                n if n == Deposit as u8 => {
+                    sol_bp.process_deposit_tx(tx_idx, *entry.sol_tx, instr_data)
+                }
                 _ => Ok(()),
             } {
                 tracing::warn!(
@@ -560,11 +637,11 @@ impl BlockParser {
         }
     }
 
-    pub async fn parse(
+    pub async fn parse<T: TxParser>(
         &mut self,
         final_slot: Slot,
         mut max_blocks: usize,
-        tx_parser: &mut TxParser,
+        tx_parser: &mut T,
     ) -> ProgramResult<Option<BlockParseResult>> {
         max_blocks = std::cmp::min(max_blocks, final_slot as usize);
         if let Some(final_block) = self.solana_block_storage.get_block(final_slot).await? {
@@ -582,6 +659,7 @@ impl BlockParser {
                         final_block,
                         tx_parser,
                         self.parse_mode,
+                        self.enable_deposit_slot,
                     )?));
                 } else if blocks_parsed >= max_blocks {
                     return Err(Custom(format!(
@@ -596,5 +674,273 @@ impl BlockParser {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::indexer::parsers::block_parser::{GasReport, TxResult};
+    use crate::indexer::parsers::log_parser::ExitReason;
+    use ethers::core::k256::ecdsa::SigningKey;
+    use ethers::prelude::transaction::eip2718::TypedTransaction;
+    use ethers::prelude::OtherFields;
+    use ethers::signers::{Signer, Wallet};
+    use ethers::types::{
+        Address, Bytes, NameOrAddress, Transaction, TransactionRequest, U256, U64,
+    };
+    use rand::{random, thread_rng};
+    use std::ops::Mul;
+
+    struct MockTxParser {
+        pub transactions: Vec<(Transaction, TxResult)>,
+    }
+
+    impl TxParser for MockTxParser {
+        fn register_slot_transactions(
+            &mut self,
+            _slot_number: Slot,
+            _slot_txs: ParsedTxs,
+        ) -> ProgramResult<()> {
+            todo!()
+        }
+
+        fn is_slot_complete(&self, _slot_number: Slot) -> bool {
+            todo!()
+        }
+
+        fn finalize_slot(&self, _slot_number: Slot) -> ProgramResult<Vec<(Transaction, TxResult)>> {
+            Ok(self.transactions.clone())
+        }
+
+        fn retain_from_slot(&mut self, _from_slot: Slot) {
+            todo!()
+        }
+    }
+
+    pub fn create_wallet() -> Wallet<SigningKey> {
+        Wallet::new(&mut thread_rng())
+    }
+
+    pub fn create_result(gas_report: GasReport) -> TxResult {
+        TxResult {
+            exit_reason: ExitReason {
+                code: 0,
+                reason: "".to_string(),
+                return_value: vec![],
+            },
+            logs: vec![],
+            gas_report,
+        }
+    }
+
+    const SIMPLE_TX_GAS: U256 = U256::one();
+
+    pub async fn create_simple_tx(
+        chain_id: Option<U64>,
+        wallet: &Wallet<SigningKey>,
+        gas_recipient: Option<Address>,
+    ) -> (Transaction, TxResult) {
+        let to = Address::random();
+        let value = U256::from(100);
+        let gas_price = U256::from(1);
+        let gas = SIMPLE_TX_GAS;
+        let nonce = U256::from(random::<u32>());
+
+        let tx_request = TypedTransaction::Legacy(TransactionRequest {
+            from: Some(wallet.address()),
+            to: Some(NameOrAddress::Address(to)),
+            gas: Some(gas),
+            gas_price: Some(gas_price),
+            value: Some(value),
+            data: None,
+            nonce: Some(nonce),
+            chain_id,
+        });
+
+        let signature = wallet.sign_transaction(&tx_request).await.unwrap();
+
+        (
+            Transaction {
+                hash: tx_request.hash(&signature),
+                nonce: *tx_request.nonce().unwrap(),
+                block_hash: None,
+                block_number: None,
+                transaction_index: None,
+                from: wallet.address(),
+                to: Some(to),
+                value,
+                gas_price: Some(gas_price),
+                gas,
+                input: Bytes::new(),
+                v: U64::from(signature.v),
+                r: signature.r,
+                s: signature.s,
+                source_hash: Default::default(),
+                mint: None,
+                is_system_tx: false,
+                transaction_type: None,
+                access_list: None,
+                max_priority_fee_per_gas: None,
+                max_fee_per_gas: None,
+                chain_id: Some(U256::from(chain_id.unwrap().as_u64())),
+                other: OtherFields::default(),
+            },
+            create_result(GasReport {
+                gas_value: gas,
+                gas_price,
+                gas_recipient,
+            }),
+        )
+    }
+
+    const CHAIN_ID1: Option<U64> = Some(U64::one());
+    const SLOT_NUMBER: Slot = 123;
+
+    fn create_block_parse_result(
+        transactions: Vec<(Transaction, TxResult)>,
+        enable_deposits_slot: Option<Slot>,
+    ) -> ProgramResult<BlockParseResult> {
+        let mut tx_parser = MockTxParser { transactions };
+
+        BlockParseResult::new(
+            SLOT_NUMBER,
+            Arc::new(UiConfirmedBlock {
+                previous_blockhash: "F9j8t4tCumYJn8fcyw5nFg28YebU1caRXnoogSbtrX7F".to_string(),
+                blockhash: "CvjH76pDbx5jJRThU6n2VrhMqwtjNCdXDSjTfpxnb4dR".to_string(),
+                parent_slot: 0,
+                transactions: None,
+                signatures: None,
+                rewards: None,
+                num_reward_partitions: None,
+                block_time: Some(0),
+                block_height: None,
+            }),
+            &mut tx_parser,
+            BlockParseMode::EngineApi,
+            enable_deposits_slot,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_grouping_gas_recipients() {
+        let gas_recipient1 = Address::random();
+        let gas_recipient2 = Address::random();
+        let gas_recipient3 = Address::random();
+
+        let wallet = create_wallet();
+
+        let parse_result = create_block_parse_result(
+            vec![
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient2)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient1)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient1)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient1)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, None).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient2)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient1)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient3)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient3)).await,
+                create_simple_tx(CHAIN_ID1, &wallet, None).await,
+                create_simple_tx(CHAIN_ID1, &wallet, None).await,
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(parse_result.eth_blocks.len(), 7);
+
+        assert_eq!(
+            parse_result.eth_blocks[0].gas_recipient,
+            Some(gas_recipient2)
+        );
+        assert_eq!(
+            parse_result.eth_blocks[0].block_gas_used,
+            SIMPLE_TX_GAS.mul(1)
+        );
+
+        assert_eq!(
+            parse_result.eth_blocks[1].gas_recipient,
+            Some(gas_recipient1)
+        );
+        assert_eq!(
+            parse_result.eth_blocks[1].block_gas_used,
+            SIMPLE_TX_GAS.mul(3)
+        );
+
+        assert_eq!(parse_result.eth_blocks[2].gas_recipient, None);
+        assert_eq!(
+            parse_result.eth_blocks[2].block_gas_used,
+            SIMPLE_TX_GAS.mul(1)
+        );
+
+        assert_eq!(
+            parse_result.eth_blocks[3].gas_recipient,
+            Some(gas_recipient2)
+        );
+        assert_eq!(
+            parse_result.eth_blocks[3].block_gas_used,
+            SIMPLE_TX_GAS.mul(1)
+        );
+
+        assert_eq!(
+            parse_result.eth_blocks[4].gas_recipient,
+            Some(gas_recipient1)
+        );
+        assert_eq!(
+            parse_result.eth_blocks[4].block_gas_used,
+            SIMPLE_TX_GAS.mul(1)
+        );
+
+        assert_eq!(
+            parse_result.eth_blocks[5].gas_recipient,
+            Some(gas_recipient3)
+        );
+        assert_eq!(
+            parse_result.eth_blocks[5].block_gas_used,
+            SIMPLE_TX_GAS.mul(2)
+        );
+
+        assert_eq!(parse_result.eth_blocks[6].gas_recipient, None);
+        assert_eq!(
+            parse_result.eth_blocks[6].block_gas_used,
+            SIMPLE_TX_GAS.mul(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_adding_l1_attributes_to_empty_block() {
+        let parse_result = create_block_parse_result(vec![], Some(SLOT_NUMBER - 1)).unwrap();
+
+        assert_eq!(parse_result.transactions.len(), 1);
+        assert_eq!(
+            parse_result.transactions[0].0.transaction_type,
+            Some(U64::from(0x7E))
+        );
+
+        assert_eq!(parse_result.eth_blocks.len(), 1);
+        assert_eq!(parse_result.eth_blocks[0].transactions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_adding_l1_attributes_to_not_empty_block() {
+        let gas_recipient2 = Address::random();
+        let wallet = create_wallet();
+
+        let parse_result = create_block_parse_result(
+            vec![create_simple_tx(CHAIN_ID1, &wallet, Some(gas_recipient2)).await],
+            Some(SLOT_NUMBER - 1),
+        )
+        .unwrap();
+
+        assert_eq!(parse_result.transactions.len(), 2);
+        assert_eq!(
+            parse_result.transactions[0].0.transaction_type,
+            Some(U64::from(0x7E))
+        );
+
+        assert_eq!(parse_result.eth_blocks.len(), 2);
+        assert_eq!(parse_result.eth_blocks[0].transactions.len(), 1);
+        assert_eq!(parse_result.eth_blocks[1].transactions.len(), 1);
     }
 }

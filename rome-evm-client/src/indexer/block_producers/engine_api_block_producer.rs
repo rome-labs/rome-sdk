@@ -31,6 +31,7 @@ impl EngineAPIBlockProducer {
         }
     }
 
+    #[tracing::instrument(name = "block_producer::get_finalized_blockhash", skip(self), fields(parent_hash = ?parent_hash))]
     async fn get_finalized_blockhash(&self, parent_hash: &Option<H256>) -> ProgramResult<H256> {
         if parent_hash.is_some() {
             if let Ok(Some(block)) = self
@@ -77,6 +78,7 @@ impl BlockProducer for EngineAPIBlockProducer {
         Ok(self.geth_api.get_block_number().await?)
     }
 
+    #[tracing::instrument(name = "block_producer::get_block_params", skip(self), fields(block_number = ?block_number))]
     async fn get_block_params(&self, block_number: U64) -> ProgramResult<BlockParams> {
         let Some(block) = self
             .geth_api
@@ -101,6 +103,10 @@ impl BlockProducer for EngineAPIBlockProducer {
         }
     }
 
+    #[tracing::instrument(
+        name = "block_producer::produce_blocks",
+        skip(self, producer_params, limit)
+    )]
     async fn produce_blocks(
         &self,
         producer_params: &ProducerParams,
@@ -184,7 +190,7 @@ impl BlockProducer for EngineAPIBlockProducer {
                             .values()
                             .map(|(tx, tx_result)| StateAdvanceTx {
                                 rlp: tx.rlp().to_string(),
-                                gas_price: tx.gas_price.map(|v| v.as_u64()).unwrap_or_default(),
+                                gas_price: tx_result.gas_report.gas_price.as_u64(),
                                 gas_used: tx_result.gas_report.gas_value.as_u64(),
                             })
                             .collect(),

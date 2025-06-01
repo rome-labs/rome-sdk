@@ -3,6 +3,7 @@ use ethers::addressbook::Address;
 use ethers::prelude::transaction::eip2718::TypedTransaction;
 use ethers::prelude::transaction::optimism::DepositTransaction;
 use ethers::prelude::{Bytes, NameOrAddress, Transaction, TransactionRequest, H256, U256};
+use ethers::types::U64;
 use ethers::utils::keccak256;
 use rlp::{Decodable, Rlp};
 use solana_program::clock::Slot;
@@ -23,8 +24,8 @@ const L1_ATTRIBUTES_GAS_LIMIT: u64 = 150_000_000;
 
 fn create_l1_attributes_tx_data(
     l1_block_number: Slot,
-    l1_blockhash: H256,
-    l1_timestamp: U256,
+    l1_blockhash: &H256,
+    l1_timestamp: &U256,
 ) -> Bytes {
     let mut bytes = Vec::new();
     let mut buf = [0u8; 32];
@@ -56,7 +57,7 @@ fn create_l1_attributes_tx_data(
     Bytes::from(bytes)
 }
 
-fn create_l1_attributes_source_hash(l1_block_number: Slot, l1_blockhash: H256) -> H256 {
+fn create_l1_attributes_source_hash(l1_block_number: Slot, l1_blockhash: &H256) -> H256 {
     let mut buf = [0u8; 32];
     U256::from(l1_block_number).to_big_endian(&mut buf);
 
@@ -74,10 +75,28 @@ fn create_l1_attributes_source_hash(l1_block_number: Slot, l1_blockhash: H256) -
     H256::from_slice(&keccak256(&bytes))
 }
 
+pub fn create_user_deposit_source_hash(l1_blockhash: &H256, l1_log_index: U256) -> H256 {
+    let mut buf = [0u8; 32];
+    l1_log_index.to_big_endian(&mut buf);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(l1_blockhash.as_bytes());
+    bytes.extend_from_slice(&buf);
+
+    let part2 = keccak256(&bytes);
+    U256::zero().to_big_endian(&mut buf);
+
+    bytes.clear();
+    bytes.extend_from_slice(&buf);
+    bytes.extend_from_slice(&part2);
+
+    H256::from_slice(&keccak256(&bytes))
+}
+
 pub fn create_l1_attributes_tx(
     l1_block_number: Slot,
-    l1_blockhash: H256,
-    l1_timestamp: U256,
+    l1_blockhash: &H256,
+    l1_timestamp: &U256,
 ) -> (Transaction, TxResult) {
     let tx = TypedTransaction::DepositTransaction(DepositTransaction {
         tx: TransactionRequest {
@@ -103,4 +122,13 @@ pub fn create_l1_attributes_tx(
         Transaction::decode(&Rlp::new(tx.rlp().as_ref())).unwrap(),
         TxResult::default(),
     )
+}
+
+pub fn update_if_user_deposited_tx(tx: &mut Transaction, l1_blockhash: &H256, l1_log_index: U256) {
+    if tx.transaction_type != Some(U64::from(0x7E)) || tx.is_system_tx {
+        return;
+    }
+
+    tx.source_hash = create_user_deposit_source_hash(l1_blockhash, l1_log_index);
+    tx.hash = tx.hash();
 }
