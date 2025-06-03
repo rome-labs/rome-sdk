@@ -4,6 +4,13 @@ description = "The `Sdk` building block to interact with and develop the Rome So
 version = "0.1.0"
 edition = "2021"
 
+[features]
+single-state = ["rome-evm-client/single-state"]
+testnet = ["rome-evm-client/testnet"]
+mainnet = ["rome-evm-client/mainnet"]
+ci = ["rome-evm-client/ci"]
+default = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

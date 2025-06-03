@@ -50,13 +50,6 @@ jobs:
           ref: ${{ env.evm_branch_name }}
           token: ${{ secrets.GIT_ROLLUP_TOKEN }}
 
-      - name: 'Checkout Relayer repository'
-        uses: actions/checkout@master
-        with:
-          repository: rome-labs/rome-relayer
-          path: rome-relayer
-          token: ${{ secrets.GIT_ROLLUP_TOKEN }}
-
       - name: 'Build rome-sdk'
         uses: docker/build-push-action@v4.0.0
         with:

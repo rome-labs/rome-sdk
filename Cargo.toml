@@ -51,8 +51,11 @@ rome-utils = { path = "rome-utils" }
 rome-geth = { path = "rome-geth" }
 rome-evm-client = { path = "rome-evm-client" }
 # Rome Relayer
-api = { path = "../rome-relayer/lib/api" }
-tonic = "0.13.0" 
+rome-relayer = { path = "rome-relayer" }
+tonic = "0.13.1" 
+tonic-build = "0.13.1"
+prost = "0.13.5"
+prost-build = "0.13.5"
 moka = "0.12.10"
 # Other utilities
 futures-util = { version = "0.3.30", features = ["sink", "tokio-io"] }

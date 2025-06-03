@@ -3,6 +3,13 @@ name = "rome-evm-client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+single-state = ["rome-evm/single-state"]
+testnet = ["rome-evm/testnet"]
+mainnet = ["rome-evm/mainnet"]
+ci = ["rome-evm/ci"]
+default = []
+
 [dependencies]
 anyhow = { workspace = true }
 tracing = {workspace = true}
@@ -27,7 +34,7 @@ jsonrpsee-core = { workspace = true}
 
 # relayer
 tonic = { workspace = true }
-api = { workspace = true } 
+rome-relayer = { workspace = true } 
 moka = {  workspace = true, features = ["future"] }
 
 solana-client = {workspace = true}

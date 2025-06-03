@@ -1,11 +1,11 @@
 use crate::error::{ProgramResult, RomeEvmError};
 use crate::indexer::pg_storage::PgPool;
 use crate::indexer::SolanaBlockStorage;
-use api::client::RelayerClient;
-use api::{get_block_request::Filter, GetBlockRequest, GetBlockResponse, GetSlotRequest};
 use diesel::prelude::QueryableByName;
 use diesel::{sql_types, RunQueryDsl};
 use moka::future::Cache;
+use rome_relayer::client::RelayerClient;
+use rome_relayer::{get_block_request::Filter, GetBlockRequest, GetBlockResponse, GetSlotRequest};
 use solana_sdk::clock::Slot;
 use solana_sdk::transaction::{Legacy, TransactionVersion};
 use solana_transaction_status::option_serializer::OptionSerializer;
@@ -245,7 +245,7 @@ fn cast_block_response_to_ui_block(block: GetBlockResponse) -> (UiConfirmedBlock
     let (sigs, txs) = txs
         .into_iter()
         .map(|tx| {
-            let api::EncodedTransaction {
+            let rome_relayer::EncodedTransaction {
                 signature,
                 body,
                 is_legacy,

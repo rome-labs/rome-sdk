@@ -504,16 +504,15 @@ impl RomeEVMClient {
     }
 
     /// Instruction is used to registry rollup owner.
-    /// This private instruction must be signed with the upgrade-authority keypair that was used
-    /// to deploy the rome-evm contract.
-    pub async fn reg_owner(&self, chain_id: u64, upgrade_authority: &Keypair) -> ProgramResult<()> {
+    /// This private instruction must be signed with the registry-authority keypair
+    pub async fn reg_owner(&self, chain_id: u64, registry_authority: &Keypair) -> ProgramResult<()> {
         let mut data = vec![Instruction::RegOwner as u8];
         data.extend(chain_id.to_le_bytes());
 
         let emulation = emulator::emulate(
             self.program_id(),
             &data,
-            &upgrade_authority.pubkey(),
+            &registry_authority.pubkey(),
             self.sync_rpc_client(),
         )?;
 
@@ -521,8 +520,8 @@ impl RomeEVMClient {
         let blockhash = self.rpc_client().get_latest_blockhash().await?;
         let tx = Transaction::new_signed_with_payer(
             &[ix],
-            Some(&upgrade_authority.pubkey()),
-            &[upgrade_authority],
+            Some(&registry_authority.pubkey()),
+            &[registry_authority],
             blockhash,
         );
         let _ = self.rpc_client().send_and_confirm_transaction(&tx).await?;

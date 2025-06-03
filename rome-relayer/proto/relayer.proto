@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package relayer;
+
+// Service definition for the Relayer API
+service RelayerApi {
+    // Get a block by its blockhash
+    rpc GetBlock (GetBlockRequest) returns (GetBlockResponse);
+
+    // Get the current slot
+    rpc GetSlot (GetSlotRequest) returns (GetSlotResponse);
+
+    // Get the current blockhash
+    rpc GetBlockhash (GetBlockhashRequest) returns (GetBlockhashResponse);
+}
+
+// Encoded transaction
+message EncodedTransaction {
+    // Transaction signature
+    string signature = 1;
+    // Body of the transaction (Base58 encoded)
+    string body = 2;
+    // Ix the transaction body legacy binary
+    bool is_legacy = 3;
+    // Error in the transaction (Bincode encoded)
+    optional bytes error = 4;
+    // Logs from the transaction
+    repeated string logs = 5;
+    // Version of the transaction
+    int32 version = 6;
+    // Fee
+    uint64 fee = 7;
+}
+
+// Request to get a block
+message GetBlockRequest {
+  oneof filter {
+    // The blockhash of the block to retrieve
+    string block_hash = 1;
+    // The slot of the block to retrieve
+    int64 slot = 2;
+    // Flag to indicate finalized block
+    bool finalized = 3;
+  }
+}
+
+// Request to get the current slot
+message GetSlotRequest {
+    // Flag to indicate finalized block
+    bool finalized = 1;
+}
+
+// Request to get the current blockhash
+message GetBlockhashRequest {
+    // Flag to indicate finalized block
+    bool finalized = 1;
+}
+
+// Response containing block details
+message GetBlockResponse {
+    // Unique slot number of the block
+    uint64 slot = 1;
+    // Unique hash of the block
+    string block_hash = 2;
+    // Flag to indicate if the block is finalized
+    bool finalized = 3;
+    // Slot number of the parent block
+    uint64 parent_slot = 4;
+    // Hash of the parent block
+    string prev_block_hash = 5;
+    // Block time
+    int64 block_time = 6;
+    // Block height
+    optional uint64 block_height = 7;
+    // Signatures stored in the block
+    repeated EncodedTransaction txs = 8;
+}
+
+// Response for getting the current slot
+message GetSlotResponse {
+    // The current slot
+    uint64 slot = 1;
+}
+
+// Response for getting the current blockhash
+message GetBlockhashResponse {
+    // The current blockhash
+    string block_hash = 1;
+}

@@ -1,0 +1,20 @@
+[package]
+name = "rome-relayer"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tonic-build = { workspace = true }
+prost-build = { workspace = true }
+
+[dev-dependencies]
+# async
+tokio = { workspace = true }
+
+[dependencies]
+# tracing
+tracing = { workspace = true }
+
+# proto buf
+tonic = { workspace = true } 
+prost = { workspace = true } 
