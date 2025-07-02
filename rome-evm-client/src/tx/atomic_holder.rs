@@ -1,33 +1,31 @@
-use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-
-use super::{builder::TxBuilder, TransmitTx};
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    Resource,
+use {
+    super::{atomic::advance_with_version, TransmitTx},
+    crate::error::{ProgramResult, RomeEvmError},
+    async_trait::async_trait,
+    rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch, TxVersion},
+    solana_sdk::signature::Keypair,
+    std::sync::Arc,
 };
-use async_trait::async_trait;
-use ethers::types::{Bytes, TxHash};
-use solana_sdk::signature::Keypair;
-use std::sync::Arc;
-
-pub struct AtomicTxHolder {
-    step: Steps,
-    transmit_tx: TransmitTx,
-}
 
 enum Steps {
     Transmit,
     Execute,
-    Complete,
+    End,
+}
+pub struct AtomicTxHolder {
+    step: Steps,
+    pub transmit_tx: TransmitTx,
 }
 
 impl AtomicTxHolder {
-    pub fn new(tx_builder: TxBuilder, resource: Resource, rlp: Bytes, hash: TxHash) -> Self {
-        let transmit_tx = TransmitTx::new(tx_builder, resource, rlp, hash);
-        Self {
-            transmit_tx,
-            step: Steps::Transmit,
-        }
+    pub fn new(transmit_tx: TransmitTx, use_alt: bool) -> Self {
+        let step = if use_alt {
+            Steps::Execute
+        } else {
+            Steps::Transmit
+        };
+
+        Self { transmit_tx, step }
     }
 
     fn tx_data(&self) -> Vec<u8> {
@@ -56,7 +54,7 @@ impl AdvanceTx<'_> for AtomicTxHolder {
     type Error = RomeEvmError;
 
     fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
-        match &self.step {
+        match &mut self.step {
             Steps::Transmit => {
                 let ix = self.transmit_tx.advance();
 
@@ -68,14 +66,15 @@ impl AdvanceTx<'_> for AtomicTxHolder {
                 }
             }
             Steps::Execute => {
-                self.step = Steps::Complete;
+                self.step = Steps::End;
                 let ix = self.ixs()?;
 
-                Ok(IxExecStepBatch::Single(ix))
+                Ok(IxExecStepBatch::Single(ix, TxVersion::Legacy))
             }
             _ => Ok(IxExecStepBatch::End),
         }
     }
+    advance_with_version!();
     fn payer(&self) -> Arc<Keypair> {
         self.transmit_tx.payer()
     }

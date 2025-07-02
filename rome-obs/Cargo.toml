@@ -13,6 +13,7 @@ opentelemetry_sdk = { workspace = true, features = ["metrics", "rt-tokio"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = [ "fmt", "registry", "env-filter" ] }
 tracing-opentelemetry = { workspace = true }
+backoff = { workspace = true }
 
 ## url
 url = { workspace = true }

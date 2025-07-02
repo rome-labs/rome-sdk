@@ -1,12 +1,16 @@
-use std::borrow::Cow;
-
-use solana_sdk::compute_budget::ComputeBudgetInstruction;
-use solana_sdk::hash::Hash;
-use solana_sdk::instruction::Instruction;
-use solana_sdk::message::Message;
-use solana_sdk::signature::Keypair;
-use solana_sdk::signer::Signer;
-use solana_sdk::transaction::Transaction;
+use {
+    solana_sdk::{
+        address_lookup_table::AddressLookupTableAccount,
+        compute_budget::ComputeBudgetInstruction,
+        hash::Hash,
+        instruction::Instruction,
+        message::{v0, Message, VersionedMessage},
+        signature::Keypair,
+        signer::{Signer, SignerError},
+        transaction::{Transaction, VersionedTransaction},
+    },
+    std::borrow::Cow,
+};
 
 /// An atomic batch of instructions that can be composed into a single transaction
 #[derive(Clone)]
@@ -36,6 +40,11 @@ impl AtomicIxBatch<'static> {
             ix,
         ]))
     }
+    
+    /// Add svm instructions
+    pub fn push(&mut self, mut ix: Vec<Instruction>) {
+        self.0.to_mut().append(&mut ix)
+    }
 }
 
 impl AtomicIxBatch<'_> {
@@ -47,20 +56,36 @@ impl AtomicIxBatch<'_> {
         AtomicIxBatch(Cow::Borrowed(ixs))
     }
     /// Compose a [Transaction] from [IxBatch]
-    pub fn compose_solana_tx(&self, payer: &Keypair, blockhash: Hash) -> Transaction {
+    pub fn compose_legacy_solana_tx(
+        &self,
+        payer: &Keypair,
+        blockhash: Hash,
+    ) -> VersionedTransaction {
         let message = Message::new(&self.0, Some(&payer.pubkey()));
 
-        Transaction::new(&[payer], message, blockhash)
+        Transaction::new(&[payer], message, blockhash).into()
+    }
+
+    pub fn compose_v0_solana_tx(
+        &self,
+        payer: &Keypair,
+        blockhash: Hash,
+        alt: &[AddressLookupTableAccount],
+    ) -> Result<VersionedTransaction, SignerError> {
+        let message = v0::Message::try_compile(&payer.pubkey(), &self.0, alt, blockhash)
+            .map_err(|e| SignerError::Custom(e.to_string()))?;
+
+        VersionedTransaction::try_new(VersionedMessage::V0(message), &[payer])
     }
 
     /// Compose a [Transaction] from [IxBatch] and signers
-    pub fn compose_solana_tx_with_signers(
+    pub fn compose_legacy_solana_tx_with_signers(
         &self,
         payer: &Keypair,
         signers: &[&Keypair],
         blockhash: Hash,
-    ) -> Transaction {
-        println!("compose_solana_tx_with_signers");
+    ) -> VersionedTransaction {
+        println!("compose_legacy_solana_tx_with_signers");
         let message = Message::new(&self.0, Some(&payer.pubkey()));
 
         let mut all_signers = vec![payer]; // Start with payer
@@ -69,7 +94,7 @@ impl AtomicIxBatch<'_> {
         all_signers.iter().for_each(|signer| {
             println!("signer pubkey: {:?}", signer.pubkey());
         });
-        Transaction::new(&all_signers, message, blockhash)
+        Transaction::new(&all_signers, message, blockhash).into()
     }
 }
 

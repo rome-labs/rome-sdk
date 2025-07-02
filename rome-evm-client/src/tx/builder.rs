@@ -1,24 +1,37 @@
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    tx::{utils::build_solana_tx, AtomicTx, AtomicTxHolder, IterativeTx, IterativeTxHolder},
-    Payer, Resource, ResourceFactory,
+use {
+    crate::{
+        error::{ProgramResult, RomeEvmError::{self, *}},
+        tx::{
+            AltComposed, AltComposedHolder, AltTx, AtomicTx, AtomicTxHolder, IterativeTx,
+            IterativeTxHolder, TransmitTx, AtomicSvm,
+        },
+        util::{check_accounts_len, check_exit_reason},
+        Payer, Resource, ResourceFactory,
+    },
+    bincode::serialize,
+    emulator::{emulate, Emulation},
+    ethers::types::{Bytes, TxHash},
+    rome_solana::{
+        batch::{AdvanceTx, OwnedAtomicIxBatch},
+        types::SyncAtomicRpcClient,
+    },
+    serde_json::json,
+    solana_client::rpc_config::RpcSendTransactionConfig,
+    solana_program::{
+        address_lookup_table::AddressLookupTableAccount,
+        hash::Hash,
+        instruction::{AccountMeta, Instruction},
+    },
+    solana_sdk::{
+        bs58, commitment_config::CommitmentLevel, packet::PACKET_DATA_SIZE, pubkey::Pubkey,
+        signer::keypair::Keypair,
+    },
+    solana_transaction_status::UiTransactionEncoding,
+    std::sync::Arc,
 };
-use bincode::serialize;
-use emulator::{emulate, Emulation};
-use ethers::types::{Bytes, TxHash};
-use rome_solana::{batch::AdvanceTx, types::SyncAtomicRpcClient};
-use serde_json::json;
-use solana_client::rpc_config::RpcSendTransactionConfig;
-use solana_program::{
-    hash::Hash,
-    instruction::{AccountMeta, Instruction},
-};
-use solana_sdk::{bs58, packet::PACKET_DATA_SIZE, pubkey::Pubkey};
-use solana_transaction_status::UiTransactionEncoding;
 
-use crate::util::check_exit_reason;
-use rome_solana::batch::OwnedAtomicIxBatch;
-use solana_sdk::signer::keypair::Keypair;
+pub type Iterable<'a> = Box<dyn AdvanceTx<'static, Error = RomeEvmError>>;
+pub const USE_ALT_KEYS_BOUND: usize = 28; // depends on iterative_holder.tx_data() length
 
 /// Transaction Builder for Rome EVM
 #[derive(Clone)]
@@ -51,8 +64,9 @@ impl TxBuilder {
         }
     }
 
-    pub async fn lock_resource(&self) -> ProgramResult<Resource> {
-        self.resource_factory.get().await
+    pub async fn lock_resource(&self) -> ProgramResult<Arc<Resource>> {
+        let resource = self.resource_factory.get().await?;
+        Ok(Arc::new(resource))
     }
 
     /// get program id
@@ -67,81 +81,123 @@ impl TxBuilder {
 
         let emulation = emulate(&self.program_id, data, payer, self.rpc_client.clone())?;
         check_exit_reason(&emulation)?;
+        check_accounts_len(&emulation)?;
 
         Ok(emulation)
     }
 
-    fn build_atomic(
+    pub fn compose_iterable_with_holder(
         &self,
-        atomic_tx: AtomicTx,
-        rlp: Bytes,
-        tx_hash: TxHash,
-    ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
-        let ix = atomic_tx.ix.as_ref().unwrap();
+        use_alt: bool,
+        keys: Vec<Pubkey>,
+        transmit_tx: TransmitTx,
+        iterable_tx: Iterable,
+    ) -> ProgramResult<Box<dyn AdvanceTx<'static, Error = RomeEvmError>>> {
+        if use_alt {
+            tracing::info!("Address lookup table needed, Tx Holder needed");
 
-        if use_holder(ix, &atomic_tx.resource.payer())? {
-            tracing::info!("Atomic Tx Holder needed");
-            let atomix_tx_holder =
-                AtomicTxHolder::new(self.clone(), atomic_tx.resource, rlp, tx_hash);
+            let alt_tx = AltTx::new(self.clone(), transmit_tx.resource.clone(), keys)?;
+            let tx = AltComposedHolder::new(alt_tx, transmit_tx, iterable_tx)?;
 
-            Ok(Box::new(atomix_tx_holder))
+            Ok(Box::new(tx))
         } else {
-            tracing::info!("Simple Atomic Tx");
+            tracing::info!("Tx Holder needed");
+            Ok(iterable_tx)
+        }
+    }
+    pub fn compose_iterable_without_holder(
+        &self,
+        use_alt: bool,
+        keys: Vec<Pubkey>,
+        resource: Arc<Resource>,
+        iterable_tx: Iterable,
+    ) -> ProgramResult<Box<dyn AdvanceTx<'static, Error = RomeEvmError>>> {
+        if use_alt {
+            tracing::info!("Address lookup table needed");
+            let alt_tx = AltTx::new(self.clone(), resource, keys)?;
+            let tx = AltComposed::new(alt_tx, iterable_tx)?;
 
-            Ok(Box::new(atomic_tx))
+            Ok(Box::new(tx))
+        } else {
+            Ok(iterable_tx)
         }
     }
 
-    fn build_iterative(
+    pub fn compose_iterable(
         &self,
-        resource: Resource,
+        ix: &OwnedAtomicIxBatch,
+        resource: Arc<Resource>,
         rlp: Bytes,
-        tx_hash: TxHash,
-    ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
-        let mut iterative_tx = IterativeTx::new(self.clone(), resource, rlp.clone())?;
-        iterative_tx.ixs()?;
-        let ix = iterative_tx
-            .ixs
-            .as_ref()
-            .unwrap()
-            .last()
-            .expect("no instructions in iterative Tx");
+        hash: TxHash,
+        iterable: Iterable,
+        is_atomic: bool,
+    ) -> ProgramResult<Iterable> {
+        let keys = tx_keys(ix);
+        let use_alt = use_alt(&keys);
 
-        if use_holder(ix, &iterative_tx.resource.payer())? {
-            tracing::info!("Iterative Tx Holder needed");
-
-            let iterative_tx_holder =
-                IterativeTxHolder::new(self.clone(), iterative_tx.resource, rlp, tx_hash);
-
-            Ok(Box::new(iterative_tx_holder))
+        let alt = if use_alt {
+            let acc = AddressLookupTableAccount {
+                key: Pubkey::default(),
+                addresses: keys.clone(),
+            };
+            Some(vec![acc])
         } else {
-            tracing::info!("Iterative Tx without Holder needed");
+            None
+        };
 
-            Ok(Box::new(iterative_tx))
+        if use_holder(
+            ix,
+            &resource.payer(),
+            self.rpc_client.commitment().commitment,
+            alt.as_ref(),
+        )? {
+            let transmit_tx = TransmitTx::new(self.clone(), resource.clone(), rlp, hash);
+
+            let iterable_with_holder: Iterable = if is_atomic {
+                Box::new(AtomicTxHolder::new(transmit_tx.clone(), use_alt))
+            } else {
+                Box::new(IterativeTxHolder::new(transmit_tx.clone(), use_alt))
+            };
+
+            self.compose_iterable_with_holder(use_alt, keys, transmit_tx, iterable_with_holder)
+        } else {
+            self.compose_iterable_without_holder(use_alt, keys, resource, iterable)
         }
     }
-
     /// Build a transaction
     #[tracing::instrument(skip(self, rlp))]
-    pub async fn build_tx(
-        &self,
-        rlp: Bytes,
-        tx_hash: TxHash,
-    ) -> ProgramResult<Box<dyn AdvanceTx<'_, Error = RomeEvmError>>> {
+    pub async fn build_tx(&self, rlp: Bytes, hash: TxHash) -> ProgramResult<Iterable> {
         // Lock a holder, payer
         let resource = self.lock_resource().await?;
-        let mut atomic_tx = AtomicTx::new(self.clone(), rlp.to_vec(), resource);
-
+        let mut atomic_tx = AtomicTx::new(self.clone(), rlp.to_vec(), resource.clone());
         // Build the instruction
         atomic_tx.ix()?;
+
         let emulation = atomic_tx.emulation.as_ref().unwrap();
 
-        tracing::info!("Building Transaction");
-        if emulation.is_atomic {
-            self.build_atomic(atomic_tx, rlp, tx_hash)
+        let (ix, tx, is_atomic): (OwnedAtomicIxBatch, Iterable, bool) = if emulation.is_atomic {
+            tracing::info!("Building atomic transaction");
+            let ix = atomic_tx.ix.as_ref().unwrap().clone();
+
+            (ix, Box::new(atomic_tx), true)
         } else {
-            self.build_iterative(atomic_tx.resource, rlp, tx_hash)
-        }
+            tracing::info!("Building iterative transaction");
+
+            let mut iterative_tx = IterativeTx::new(self.clone(), resource.clone(), rlp.clone())?;
+            iterative_tx.ixs()?;
+
+            let ix = iterative_tx
+                .ixs
+                .as_ref()
+                .unwrap()
+                .last()
+                .expect("no instructions in iterative Tx")
+                .clone();
+
+            (ix, Box::new(iterative_tx), false)
+        };
+
+        self.compose_iterable(&ix, resource, rlp, hash, tx, is_atomic)
     }
 
     /// Build a Solana instruction from [Emulation] and data
@@ -184,21 +240,74 @@ impl TxBuilder {
             session,
         )?)
     }
+
+    /// Build a composite transaction consisting of rome-evm instruction and SVM-instructions
+    #[tracing::instrument(skip(self, rlp))]
+    pub async fn build_svm_tx(
+        &self, 
+        rlp:Bytes, 
+        svm: Vec<Instruction>, 
+        alt_keys: Option<Vec<Pubkey>>
+    ) -> ProgramResult<Iterable> {
+        let resource = self.lock_resource().await?;
+        let atomic_tx = AtomicTx::new(self.clone(), rlp.to_vec(), resource.clone());
+        let atomic_svm = AtomicSvm::new(atomic_tx, svm, alt_keys)?;
+        let ix = atomic_svm.ix();
+        let alts = atomic_svm.alts.as_ref();
+        let emulation = atomic_svm.emulation();
+
+        // TODO: can be ignored 
+        if !emulation.is_atomic {
+            SvmCompositeTxError("transaction is not atomic".to_string());
+        }
+        
+        if use_holder(
+            ix,
+            &resource.payer(),
+            self.rpc_client.commitment().commitment,
+            alts
+        )? {
+            SvmCompositeTxError("TxHolder account needed".to_string());
+        }
+
+        Ok(Box::new(atomic_svm))
+    }
 }
 
-fn use_holder(ix: &OwnedAtomicIxBatch, payer: &Keypair) -> ProgramResult<bool> {
+fn use_holder(
+    ix: &OwnedAtomicIxBatch,
+    payer: &Keypair,
+    level: CommitmentLevel,
+    alts: Option<&Vec<AddressLookupTableAccount>>,
+) -> ProgramResult<bool> {
     let data_len = ix.iter().map(|a| a.data.len()).sum::<usize>();
 
     if data_len > i16::MAX as usize {
         return Ok(true);
     }
 
-    let tx = build_solana_tx(Hash::default(), payer, ix)?;
-    let json = serialize_encode(&tx, UiTransactionEncoding::Base64)?;
-    Ok(json.len() > PACKET_DATA_SIZE)
+    let tx = if let Some(alts_) = alts {
+        ix.compose_v0_solana_tx(payer, Hash::default(), alts_)?
+    } else {
+        ix.compose_legacy_solana_tx(payer, Hash::default())
+    };
+
+    let json = serialize_encode(&tx, UiTransactionEncoding::Base64, level)?;
+    // subtract the additional 100 bytes to build json:
+    // json!({
+    //        "jsonrpc": jsonrpc,
+    //        "id": 2.0,
+    //        "method": format!("{self}"),
+    //        "params": params,
+    //     }
+    Ok(json.len() > PACKET_DATA_SIZE - 100)
 }
 
-fn serialize_encode<T>(input: &T, encoding: UiTransactionEncoding) -> ProgramResult<String>
+fn serialize_encode<T>(
+    input: &T,
+    encoding: UiTransactionEncoding,
+    level: CommitmentLevel,
+) -> ProgramResult<String>
 where
     T: serde::ser::Serialize,
 {
@@ -215,8 +324,29 @@ where
             )));
         }
     };
-    let config = RpcSendTransactionConfig::default();
+    let config = RpcSendTransactionConfig {
+        encoding: Some(encoding),
+        preflight_commitment: Some(level),
+        ..Default::default()
+    };
     let json = json!([encoded, config]);
 
     Ok(json.to_string())
 }
+fn tx_keys(ix: &[Instruction]) -> Vec<Pubkey> {
+    ix.iter()
+        .map(|x| {
+            x.accounts
+                .iter()
+                .map(|meta| meta.pubkey)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+}
+fn use_alt(keys: &Vec<Pubkey>) -> bool {
+    keys.len() > USE_ALT_KEYS_BOUND
+}
+

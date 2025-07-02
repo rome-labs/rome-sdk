@@ -10,4 +10,4 @@ pub use romulus::*;
 pub use tx_tuple::*;
 
 /// Rome Tx
-pub type RomeTx<'a> = Box<dyn rome_solana::batch::AdvanceTx<'a, Error = RomeEvmError>>;
+pub type RomeTx<'a> = Box<dyn rome_solana::batch::AdvanceTx<'static, Error = RomeEvmError>>;

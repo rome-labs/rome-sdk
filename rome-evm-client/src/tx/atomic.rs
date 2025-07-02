@@ -1,32 +1,38 @@
-use super::builder::TxBuilder;
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    Resource,
+use {
+    super::builder::TxBuilder,
+    crate::{
+        error::{ProgramResult, RomeEvmError},
+        Resource,
+    },
+    async_trait::async_trait,
+    emulator::Emulation,
+    rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch, TxVersion},
+    solana_sdk::signature::Keypair,
+    std::sync::Arc,
 };
-use async_trait::async_trait;
-use emulator::Emulation;
-use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use solana_sdk::signature::Keypair;
-use std::sync::Arc;
 
+enum Steps {
+    Execute,
+    End,
+}
 /// A simple atomic transaction
 pub struct AtomicTx {
-    tx_builder: TxBuilder,
+    pub tx_builder: TxBuilder,
     rlp: Vec<u8>,
     pub ix: Option<OwnedAtomicIxBatch>,
     pub emulation: Option<Emulation>,
-    complete: bool,
-    pub resource: Resource,
+    step: Steps,
+    pub resource: Arc<Resource>,
 }
 
 impl AtomicTx {
-    pub fn new(tx_builder: TxBuilder, rlp: Vec<u8>, resource: Resource) -> Self {
+    pub fn new(tx_builder: TxBuilder, rlp: Vec<u8>, resource: Arc<Resource>) -> Self {
         Self {
             tx_builder,
             rlp,
             ix: None,
             emulation: None,
-            complete: false,
+            step: Steps::Execute,
             resource,
         }
     }
@@ -53,24 +59,39 @@ impl AtomicTx {
     }
 }
 
+#[macro_export]
+macro_rules! advance_with_version {
+    {} => {
+        fn advance_with_version(&mut self, version: TxVersion) -> Result<IxExecStepBatch<'static>, Self::Error> {
+            let ix = self.advance();
+            match ix {
+                Ok(IxExecStepBatch::Single(ix_, _)) => Ok(IxExecStepBatch::Single(ix_, version)),
+                _ => ix,
+            }
+        }
+    }
+}
+pub(crate) use advance_with_version;
+
 #[async_trait]
 impl AdvanceTx<'_> for AtomicTx {
     type Error = RomeEvmError;
 
     fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
-        if self.complete {
-            return Ok(IxExecStepBatch::End);
+        match &mut self.step {
+            Steps::Execute => {
+                if self.ix.is_none() {
+                    self.ix()?;
+                }
+                let ix = self.ix.take().unwrap();
+
+                self.step = Steps::End;
+                Ok(IxExecStepBatch::Single(ix, TxVersion::Legacy))
+            }
+            _ => Ok(IxExecStepBatch::End),
         }
-
-        self.complete = true;
-
-        if self.ix.is_none() {
-            self.ix()?;
-        }
-        let ix = self.ix.take().unwrap();
-
-        Ok(IxExecStepBatch::Single(ix))
     }
+    advance_with_version!();
     fn payer(&self) -> Arc<Keypair> {
         self.resource.payer()
     }

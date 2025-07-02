@@ -5,6 +5,7 @@ resolver = "2"
 [workspace.dependencies]
 # Error handling
 anyhow = "1.0.86"
+backoff = "0.4.0"
 thiserror = "1.0.63"
 # Logging
 tracing = "0.1.40"
@@ -49,7 +50,7 @@ flate2 = "1.0.30"
 rome-solana = { path = "rome-solana" }
 rome-utils = { path = "rome-utils" }
 rome-geth = { path = "rome-geth" }
-rome-evm-client = { path = "rome-evm-client" }
+rome-evm-client = { path = "rome-evm-client",  default-features = false}
 # Rome Relayer
 rome-relayer = { path = "rome-relayer" }
 tonic = "0.13.1" 
@@ -78,8 +79,8 @@ opentelemetry_sdk = "0.22.1"
 tracing-opentelemetry = "0.23.0"
 # Ethers
 ethers = "2.0.14"
-rome-evm = { path = "../rome-evm/program" }
-emulator = { path = "../rome-evm/emulator" }
+rome-evm = { path = "../rome-evm/program", default-features = false }
+emulator = { path = "../rome-evm/emulator", default-features = false }
 
 [patch.crates-io.curve25519-dalek]
 git ="https://github.com/block-mesh/curve25519-dalek"

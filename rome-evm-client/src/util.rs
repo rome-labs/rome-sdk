@@ -1,3 +1,4 @@
+use crate::error::RomeEvmError::TooManyAccounts;
 use crate::{
     error::{ProgramResult, RomeEvmError},
     indexer::parsers::log_parser,
@@ -7,6 +8,9 @@ use ethers::types::{NameOrAddress, TransactionRequest, U256};
 use rome_evm::{tx::legacy::Legacy as LegacyTx, ExitReason, H160 as EvmH160};
 
 pub struct RomeEvmUtil;
+
+// the feature 9LZdXeKGeBV6hRLdxS1rHbHoEUsKqesCC2ZAPTPKJAbK is not activated on mainnet-beta
+const MAX_ALLOWED_ACCOUNTS: usize = 64 - 2; // 2:  address_lookup_table account + program_id(?)
 
 impl RomeEvmUtil {
     /// Convert [U256] to [rome_evm::U256]
@@ -70,4 +74,12 @@ pub fn check_exit_reason(emulation: &Emulation) -> ProgramResult<()> {
             Err(RomeEvmError::EmulationError("StepLimitReached".to_string()))
         }
     }
+}
+
+pub fn check_accounts_len(emulation: &Emulation) -> ProgramResult<()> {
+    if emulation.accounts.len() > MAX_ALLOWED_ACCOUNTS {
+        return Err(TooManyAccounts(emulation.accounts.len()));
+    }
+
+    Ok(())
 }

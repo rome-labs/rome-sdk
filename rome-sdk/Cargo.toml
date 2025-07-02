@@ -9,7 +9,7 @@ single-state = ["rome-evm-client/single-state"]
 testnet = ["rome-evm-client/testnet"]
 mainnet = ["rome-evm-client/mainnet"]
 ci = ["rome-evm-client/ci"]
-default = []
+default = ["ci"]
 
 [dependencies]
 serde = { workspace = true }
@@ -26,7 +26,7 @@ solana-sdk = { workspace = true }
 rome-solana = { workspace = true }
 rome-utils = { workspace = true }
 rome-geth = { workspace = true }
-rome-evm-client = {workspace = true}
+rome-evm-client = {workspace = true, default-features = false}
 ethers = { workspace = true }
 
 [dev-dependencies]

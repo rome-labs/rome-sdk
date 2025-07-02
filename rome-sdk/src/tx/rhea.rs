@@ -4,6 +4,7 @@ use std::ops::Deref;
 use super::EthSignedTxTuple;
 
 /// A single evm transaction.
+#[derive(Clone, Debug)]
 pub struct RheaTx<'a>(Cow<'a, EthSignedTxTuple>);
 
 impl Deref for RheaTx<'_> {

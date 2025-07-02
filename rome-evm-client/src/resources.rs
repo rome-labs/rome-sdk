@@ -75,9 +75,9 @@ impl Payer {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct ResourceItem {
-    pub payer_keypair: Arc<Keypair>,
-    pub holder: u64,
-    pub fee_recipient: Option<Address>,
+    payer_keypair: Arc<Keypair>,
+    holder: u64,
+    fee_recipient: Option<Address>,
 }
 
 impl ResourceItem {
@@ -126,7 +126,7 @@ impl ResourceFactory {
                 let mut lock = self.0.lock()?;
                 if let Some(item) = lock.pop() {
                     return Ok(Resource {
-                        item,
+                        item: item,
                         factory: self.0.clone(),
                     });
                 }

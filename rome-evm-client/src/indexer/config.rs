@@ -6,7 +6,7 @@ use crate::indexer::parsers::block_parser::BlockParseMode;
 use crate::indexer::relayer::RelayerSolanaBlockStorage;
 use crate::indexer::{
     inmemory, pg_storage, BlockParser, BlockProducer, EthereumBlockStorage, ProgramResult,
-    SolanaBlockStorage,
+    RollupIndexer, SolanaBlockStorage,
 };
 use crate::indexer::{MultiplexedSolanaClient, SolanaBlockLoader};
 use serde::{Deserialize, Deserializer};
@@ -106,6 +106,9 @@ impl BlockProducerConfig {
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct MultiplexedSolanaClientConfig {
     pub providers: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_providers: Option<Vec<String>>,
 }
 
 impl MultiplexedSolanaClientConfig {
@@ -117,6 +120,12 @@ impl MultiplexedSolanaClientConfig {
                 .iter()
                 .map(|url| Arc::new(RpcClient::new(url.clone())))
                 .collect::<Vec<_>>(),
+
+            emergency_providers: self.emergency_providers.as_ref().map(|urls| {
+                urls.iter()
+                    .map(|url| Arc::new(RpcClient::new(url.clone())))
+                    .collect::<Vec<_>>()
+            }),
         })
     }
 }
@@ -178,30 +187,67 @@ impl EthereumStorageConfig {
         })
     }
 }
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct StorageConfig {
+    connection: pg_storage::config::PgPoolConfig,
 
-#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SolanaStorageConfig {
-    PgStorage {
-        connection: pg_storage::config::PgPoolConfig,
-    },
-    Relayer {
-        relayer_url: String,
-        connection: pg_storage::config::PgPoolConfig,
-    },
+    #[serde(default)]
+    relayer_url: Option<String>,
 }
 
-impl SolanaStorageConfig {
-    pub async fn init(&self) -> ProgramResult<Arc<dyn SolanaBlockStorage>> {
-        tracing::info!("Initializing solana block storage...");
-        match self {
-            SolanaStorageConfig::PgStorage { connection } => Ok(Arc::new(
-                pg_storage::SolanaBlockStorage::new(connection.init()?),
-            )),
-            SolanaStorageConfig::Relayer {
-                relayer_url,
-                connection,
-            } => RelayerSolanaBlockStorage::new(relayer_url.clone(), connection.init()?).await,
-        }
+impl StorageConfig {
+    pub async fn init(
+        self,
+    ) -> ProgramResult<(Arc<dyn SolanaBlockStorage>, Arc<dyn EthereumBlockStorage>)> {
+        let pg_pool = self.connection.init()?;
+        let ethereum_block_storage = Arc::new(pg_storage::EthereumBlockStorage::new(Arc::new(
+            pg_pool.clone(),
+        )));
+        let solana_block_storage = if let Some(relayer_url) = self.relayer_url {
+            RelayerSolanaBlockStorage::new(relayer_url, pg_pool.clone()).await?
+        } else {
+            Arc::new(pg_storage::SolanaBlockStorage::new(pg_pool))
+        };
+        Ok((solana_block_storage, ethereum_block_storage))
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub struct RollupIndexerConfig {
+    pub max_slot_history: Option<Slot>,
+    pub block_parser: BlockParserConfig,
+
+    #[serde(default)]
+    pub block_producer: Option<BlockProducerConfig>,
+}
+
+impl RollupIndexerConfig {
+    pub fn block_production_api_enabled(&self) -> bool {
+        self.block_producer.is_some()
+    }
+
+    pub fn init(
+        &self,
+        solana_block_storage: Arc<dyn SolanaBlockStorage>,
+        ethereum_block_storage: Arc<dyn EthereumBlockStorage>,
+        program_id: Option<Pubkey>,
+    ) -> RollupIndexer {
+        let block_parser = self
+            .block_parser
+            .init(solana_block_storage.clone(), program_id);
+
+        let block_producer = self
+            .block_producer
+            .as_ref()
+            .map(|c| c.init().expect("Failed to create block producer"));
+
+        RollupIndexer::new(
+            block_parser,
+            solana_block_storage.clone(),
+            ethereum_block_storage.clone(),
+            block_producer,
+            self.max_slot_history,
+        )
     }
 }

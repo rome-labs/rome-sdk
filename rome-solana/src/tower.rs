@@ -1,11 +1,17 @@
-use crate::batch::{AdvanceTx, AtomicIxBatch, IxExecStepBatch};
+use crate::batch::{AdvanceTx, AtomicIxBatch, IxExecStepBatch, TxVersion};
 use crate::indexers::clock::SolanaClock;
 use crate::types::AsyncAtomicRpcClient;
-use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::{
+    nonblocking::rpc_client::RpcClient,
+    rpc_config::RpcSendTransactionConfig,
+};
 use solana_rpc_client_api::client_error::Result as ClientResult;
-use solana_sdk::signature::{Keypair, Signature};
-use solana_sdk::transaction::Transaction;
+use solana_sdk::{
+    signature::{Keypair, Signature},
+    transaction::VersionedTransaction,
+};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A tower that manages functionalities of the Solana network
 #[derive(Clone)]
@@ -40,22 +46,71 @@ impl SolanaTower {
         &self,
         ixs: &'a AtomicIxBatch<'a>,
         payer: &Keypair,
-    ) -> ClientResult<Transaction> {
+        ver: &TxVersion,
+    ) -> ClientResult<VersionedTransaction> {
         let blockhash = self.client.get_latest_blockhash().await?;
-        Ok(ixs.compose_solana_tx(payer, blockhash))
+
+        let tx = match ver {
+            TxVersion::Legacy => ixs.compose_legacy_solana_tx(payer, blockhash),
+            TxVersion::V0(alt) => ixs.compose_v0_solana_tx(payer, blockhash, alt)?,
+        };
+
+        Ok(tx)
     }
 
     /// Send and confirm a transaction composed of [AtomicIxBatch]
-    #[tracing::instrument(skip(self, ixs, payer))]
+    #[tracing::instrument(skip(self, ixs, payer, ver))]
     pub async fn send_and_confirm<'a>(
         &self,
         ixs: &'a AtomicIxBatch<'a>,
         payer: &Keypair,
+        ver: &TxVersion,
     ) -> ClientResult<Signature> {
-        let tx = self.to_tx(ixs, payer).await?;
+        let tx = self.to_tx(ixs, payer, ver).await?;
         tracing::info!("Sending tx: {:?}", tx.signatures[0]);
 
-        self.client.send_and_confirm_transaction(&tx).await
+        self.client.send_and_confirm_transaction_with_spinner_and_config(
+            &tx,
+            self.client.commitment(),
+            RpcSendTransactionConfig {
+                skip_preflight : true,
+                preflight_commitment: None,
+                ..RpcSendTransactionConfig::default()
+            }
+        ).await
+    }
+
+    /// parallelize send and confirm transactions composed from multiple [AtomicIxBatch]
+    pub async fn send_and_confirm_parallel<'a>(
+        &self,
+        batch: &'a [AtomicIxBatch<'a>],
+        payer: &Keypair,
+        ver: &TxVersion,
+    ) -> ClientResult<Vec<Signature>> {
+        // create a batch of futures
+        let futs = batch
+            .iter()
+            .map(|batch| self.send_and_confirm(batch, payer, ver));
+
+        futures_util::future::join_all(futs)
+            .await
+            .into_iter()
+            .collect::<ClientResult<Vec<_>>>()
+    }
+
+    /// parallelize send and confirm transactions without checking result
+    pub async fn send_and_confirm_parallel_unchecked<'a>(
+        &self,
+        batch: &'a [AtomicIxBatch<'a>],
+        payer: &Keypair,
+        ver: &TxVersion,
+    ) -> Vec<ClientResult<Signature>> {
+        // create a batch of futures
+        let futs = batch
+            .iter()
+            .map(|batch| self.send_and_confirm(batch, payer, ver));
+
+        futures_util::future::join_all(futs).await
     }
 
     /// Send and confirm a transaction composed of [AtomicIxBatch] with signers
@@ -69,70 +124,11 @@ impl SolanaTower {
         let blockhash = self.client.get_latest_blockhash().await?;
         let signers_slice: Vec<&Keypair> = signers.iter().map(|arc| arc.as_ref()).collect();
 
-        let tx = ixs.compose_solana_tx_with_signers(payer, &signers_slice, blockhash);
+        let tx = ixs.compose_legacy_solana_tx_with_signers(payer, &signers_slice, blockhash);
         println!("Sending tx: {:?}", tx);
         tracing::info!("Sending tx: {:?}", tx.signatures[0]);
 
         self.client.send_and_confirm_transaction(&tx).await
-    }
-
-    /// Send, confirm and send again if necessary
-    #[tracing::instrument(skip(self, ixs, payer))]
-    pub async fn send_confirm_resend<'a>(
-        &self,
-        ixs: &'a AtomicIxBatch<'a>,
-        payer: &Keypair,
-    ) -> ClientResult<Signature> {
-        let tx = self.to_tx(ixs, payer).await?;
-        tracing::info!("Sending tx: {:?}", tx.signatures[0]);
-
-        match self.client.send_and_confirm_transaction(&tx).await {
-            Ok(sig) => Ok(sig),
-            Err(err) => {
-                tracing::error!("Failed to send tx: {:#?}, sending one more time", err);
-                let tx = self.update_tx(&tx, payer).await?;
-                self.client.send_and_confirm_transaction(&tx).await
-            }
-        }
-    }
-
-    async fn update_tx(&self, tx: &Transaction, payer: &Keypair) -> ClientResult<Transaction> {
-        let blockhash = self.client.get_latest_blockhash().await?;
-        let mut tx = tx.clone();
-        tx.sign(&[payer], blockhash);
-
-        Ok(tx)
-    }
-
-    /// parallelize send and confirm transactions composed from multiple [AtomicIxBatch]
-    pub async fn send_and_confirm_parallel<'a>(
-        &self,
-        batch: &'a [AtomicIxBatch<'a>],
-        payer: &Keypair,
-    ) -> ClientResult<Vec<Signature>> {
-        // create a batch of futures
-        let futs = batch
-            .iter()
-            .map(|batch| self.send_confirm_resend(batch, payer));
-
-        futures_util::future::join_all(futs)
-            .await
-            .into_iter()
-            .collect::<ClientResult<Vec<_>>>()
-    }
-
-    /// parallelize send and confirm transactions without checking result
-    pub async fn send_and_confirm_parallel_unchecked<'a>(
-        &self,
-        batch: &'a [AtomicIxBatch<'a>],
-        payer: &Keypair,
-    ) -> Vec<ClientResult<Signature>> {
-        // create a batch of futures
-        let futs = batch
-            .iter()
-            .map(|batch| self.send_and_confirm(batch, payer));
-
-        futures_util::future::join_all(futs).await
     }
 
     #[tracing::instrument(skip(self, tx))]
@@ -153,11 +149,14 @@ impl SolanaTower {
             };
 
             match tx {
-                IxExecStepBatch::Single(tx) => {
-                    let sig = self.send_and_confirm(&tx, &payer).await.map_err(|e| {
-                        tracing::warn!("Failed to send and confirm single tx: {}", e);
-                        e
-                    })?;
+                IxExecStepBatch::Single(tx, ver) => {
+                    let sig = self
+                        .send_and_confirm(&tx, &payer, &ver)
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!("Failed to send and confirm single tx: {}", e);
+                            e
+                        })?;
 
                     tracing::info!("Single tx sig: {:?}", sig);
 
@@ -177,9 +176,9 @@ impl SolanaTower {
 
                     sigs.push(sig);
                 }
-                IxExecStepBatch::Parallel(batch) => {
+                IxExecStepBatch::Parallel(batch, ver) => {
                     let batch_sigs = self
-                        .send_and_confirm_parallel(&batch, &payer)
+                        .send_and_confirm_parallel(&batch, &payer, &ver)
                         .await
                         .map_err(|e| {
                             tracing::warn!("Failed to send and confirm txs in parallel: {}", e);
@@ -190,9 +189,9 @@ impl SolanaTower {
 
                     sigs.extend(batch_sigs);
                 }
-                IxExecStepBatch::ParallelUnchecked(batch) => {
+                IxExecStepBatch::ParallelUnchecked(batch, ver) => {
                     unchecked_sigs = self
-                        .send_and_confirm_parallel_unchecked(&batch, &payer)
+                        .send_and_confirm_parallel_unchecked(&batch, &payer, &ver)
                         .await;
                 }
                 IxExecStepBatch::ConfirmationIterativeTx(confirm) => {
@@ -226,6 +225,14 @@ impl SolanaTower {
                         return Err(anyhow::anyhow!("Failed to send iterative tx: {}", error));
                     }
                 }
+                IxExecStepBatch::WaitNextSlot(slot) => loop {
+                    if self.client.get_slot().await? > slot {
+                        break;
+                    } else {
+                        let ms = Duration::from_millis(100);
+                        tokio::time::sleep(ms).await;
+                    }
+                },
                 IxExecStepBatch::End => break,
             }
         }

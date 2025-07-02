@@ -2,8 +2,12 @@ use ethers::types::SignatureError;
 use rlp::DecoderError;
 use tonic::transport::Error as TransportError;
 use {
-    ethers::types::transaction::request::RequestError, rome_evm::error::RomeProgramError,
-    solana_client::client_error::ClientError, std::sync::PoisonError, thiserror::Error,
+    ethers::types::transaction::request::RequestError,
+    rome_evm::error::RomeProgramError,
+    solana_client::client_error::ClientError,
+    solana_sdk::{instruction::InstructionError, signer::SignerError},
+    std::sync::PoisonError,
+    thiserror::Error,
 };
 
 pub type ProgramResult<T> = std::result::Result<T, RomeEvmError>;
@@ -39,6 +43,9 @@ pub enum RomeEvmError {
 
     #[error("There are no unlocked holders left")]
     NoFreeHolders,
+
+    #[error("Too many accounts: {0}, maximum allowed is 62")]
+    TooManyAccounts(usize),
 
     #[error("bincode error {0:?}")]
     BincodeError(bincode::Error),
@@ -84,6 +91,18 @@ pub enum RomeEvmError {
 
     #[error("Error converting slot: {0}")]
     InvalidSlot(std::num::TryFromIntError),
+
+    #[error("SignerError: {0}")]
+    SignerError(#[from] SignerError),
+
+    #[error("Address lookup table not found")]
+    AddressLookupTableNotFound,
+
+    #[error("InstructionError: {0}")]
+    InstructionError(#[from] InstructionError),
+    
+    #[error("Error to compose SVM-composite transaction: {0}")]
+    SvmCompositeTxError(String)
 }
 
 impl From<ClientError> for RomeEvmError {

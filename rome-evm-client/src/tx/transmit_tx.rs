@@ -1,23 +1,26 @@
-use super::utils::TRANSMIT_TX_SIZE;
-use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use solana_program::entrypoint::MAX_PERMITTED_DATA_INCREASE;
-
-use super::builder::TxBuilder;
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    Resource,
+use {
+    super::builder::TxBuilder,
+    crate::{
+        error::{ProgramResult, RomeEvmError},
+        Resource,
+    },
+    async_trait::async_trait,
+    ethers::types::{Bytes, TxHash},
+    rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch, TxVersion},
+    rome_utils::iter::into_chunks,
+    solana_program::entrypoint::MAX_PERMITTED_DATA_INCREASE,
+    solana_sdk::signature::Keypair,
+    std::sync::Arc,
 };
-use async_trait::async_trait;
-use ethers::types::{Bytes, TxHash};
-use rome_utils::iter::into_chunks;
-use solana_sdk::signature::Keypair;
-use std::sync::Arc;
 
+pub const TRANSMIT_TX_SIZE: usize = 800;
+
+#[derive(Clone)]
 pub struct TransmitTx {
     pub tx_builder: TxBuilder,
     pub rlp: Bytes,
     pub hash: TxHash,
-    pub resource: Resource,
+    pub resource: Arc<Resource>,
     step: Steps,
 }
 
@@ -29,7 +32,7 @@ enum Steps {
 }
 
 impl TransmitTx {
-    pub fn new(tx_builder: TxBuilder, resource: Resource, rlp: Bytes, hash: TxHash) -> Self {
+    pub fn new(tx_builder: TxBuilder, resource: Arc<Resource>, rlp: Bytes, hash: TxHash) -> Self {
         Self {
             tx_builder,
             rlp,
@@ -88,7 +91,7 @@ impl AdvanceTx<'_> for TransmitTx {
             }
             Steps::Execute(batches) => {
                 if let Some(batch) = batches.pop() {
-                    Ok(IxExecStepBatch::Parallel(batch))
+                    Ok(IxExecStepBatch::Parallel(batch, TxVersion::Legacy))
                 } else {
                     self.step = Steps::Complete;
                     self.advance()
@@ -96,6 +99,12 @@ impl AdvanceTx<'_> for TransmitTx {
             }
             _ => Ok(IxExecStepBatch::End),
         }
+    }
+    fn advance_with_version(
+        &mut self,
+        _: TxVersion,
+    ) -> Result<IxExecStepBatch<'static>, Self::Error> {
+        unreachable!()
     }
     fn payer(&self) -> Arc<Keypair> {
         self.resource.payer()

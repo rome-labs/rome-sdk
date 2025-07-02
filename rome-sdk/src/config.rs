@@ -5,7 +5,7 @@ use anyhow::Context;
 use rome_evm_client::resources::PayerConfig;
 use rome_solana::config::SolanaConfig;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 /// Rome interface configuration
 pub struct RomeConfig {
     /// Config to solana rpc

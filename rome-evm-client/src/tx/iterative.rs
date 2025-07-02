@@ -1,15 +1,18 @@
-use super::{builder::TxBuilder, utils::MULTIPLE_ITERATIONS};
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    Resource,
+use {
+    super::{builder::TxBuilder, AltTx},
+    crate::{
+        error::{ProgramResult, RomeEvmError},
+        Resource,
+    },
+    async_trait::async_trait,
+    emulator::Emulation,
+    ethers::{prelude::TxHash, types::Bytes, utils::keccak256},
+    rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch, TxVersion},
+    solana_sdk::signature::Keypair,
+    std::sync::Arc,
 };
-use async_trait::async_trait;
-use emulator::Emulation;
-use ethers::prelude::TxHash;
-use ethers::{types::Bytes, utils::keccak256};
-use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-use solana_sdk::signature::Keypair;
-use std::sync::Arc;
+
+pub const MULTIPLE_ITERATIONS: f64 = 1.2; // estimated number of iterations is multiplied by this value
 
 enum Steps {
     Execute,
@@ -20,15 +23,16 @@ enum Steps {
 pub struct IterativeTx {
     tx_builder: TxBuilder,
     rlp: Bytes,
-    pub resource: Resource,
+    pub resource: Arc<Resource>,
     pub ixs: Option<Vec<OwnedAtomicIxBatch>>,
     step: Steps,
     hash: TxHash,
     session: u64,
+    pub alt_tx: Option<AltTx>,
 }
 
 impl IterativeTx {
-    pub fn new(tx_builder: TxBuilder, resource: Resource, rlp: Bytes) -> ProgramResult<Self> {
+    pub fn new(tx_builder: TxBuilder, resource: Arc<Resource>, rlp: Bytes) -> ProgramResult<Self> {
         let hash: TxHash = keccak256(rlp.as_ref()).into();
 
         Ok(Self {
@@ -39,6 +43,7 @@ impl IterativeTx {
             step: Steps::Execute,
             hash,
             session: rand::random(),
+            alt_tx: None,
         })
     }
 
@@ -87,11 +92,26 @@ impl IterativeTx {
     }
 }
 
+#[macro_export]
+macro_rules! advance_with_version_it {
+    {} => {
+        fn advance_with_version(&mut self, version: TxVersion) -> Result<IxExecStepBatch<'static>, Self::Error> {
+            let ix = self.advance();
+            match ix {
+                Ok(IxExecStepBatch::ParallelUnchecked(ix_, _)) =>
+                    Ok(IxExecStepBatch::ParallelUnchecked(ix_, version)),
+                _ => ix,
+            }
+        }
+    }
+}
+pub(crate) use advance_with_version_it;
+
 #[async_trait]
 impl AdvanceTx<'_> for IterativeTx {
     type Error = RomeEvmError;
     fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
-        match &self.step {
+        match &mut self.step {
             Steps::Execute => {
                 if self.ixs.is_none() {
                     self.ixs()?;
@@ -100,7 +120,7 @@ impl AdvanceTx<'_> for IterativeTx {
                 self.step = Steps::Confirm;
                 let ixs = self.ixs.take().unwrap();
 
-                Ok(IxExecStepBatch::ParallelUnchecked(ixs))
+                Ok(IxExecStepBatch::ParallelUnchecked(ixs, TxVersion::Legacy))
             }
             Steps::Confirm => {
                 self.step = Steps::Complete;
@@ -117,6 +137,7 @@ impl AdvanceTx<'_> for IterativeTx {
             _ => Ok(IxExecStepBatch::End),
         }
     }
+    advance_with_version_it!();
     fn payer(&self) -> Arc<Keypair> {
         self.resource.payer()
     }

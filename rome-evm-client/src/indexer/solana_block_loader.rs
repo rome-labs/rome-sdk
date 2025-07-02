@@ -2,12 +2,9 @@ use crate::error::ProgramResult;
 use crate::error::RomeEvmError::Custom;
 use crate::indexer::solana_client::{GetConfirmedSignaturesForAddress2ConfigClone, SolanaClient};
 use crate::indexer::SolanaBlockStorage;
-use solana_client::client_error::ClientError;
 use solana_program::clock::Slot;
 use solana_program::pubkey::Pubkey;
-use solana_rpc_client_api::client_error::ErrorKind;
 use solana_rpc_client_api::config::{RpcBlockConfig, RpcTransactionConfig};
-use solana_rpc_client_api::request::RpcError;
 use solana_sdk::commitment_config::{CommitmentConfig, CommitmentLevel};
 use solana_sdk::signature::Signature;
 use solana_transaction_status::{
@@ -41,8 +38,10 @@ async fn load_transaction(
     program_id: Pubkey,
     signature: Signature,
     commitment: CommitmentLevel,
+    tx_retries: usize,
+    retry_delay: Duration,
 ) -> ProgramResult<Option<EncodedConfirmedTransactionWithStatusMeta>> {
-    match client
+    if let Some(tx) = client
         .get_transaction_with_config(
             &signature,
             RpcTransactionConfig {
@@ -50,76 +49,22 @@ async fn load_transaction(
                 commitment: Some(CommitmentConfig { commitment }),
                 max_supported_transaction_version: Some(0),
             },
+            tx_retries,
+            retry_delay,
         )
-        .await
+        .await?
     {
-        Ok(tx) => {
-            if let Some(vt) = tx.transaction.transaction.decode() {
-                let accounts = vt.message.static_account_keys();
-                for instruction in vt.message.instructions() {
-                    if accounts[instruction.program_id_index as usize] == program_id {
-                        return Ok(Some(tx));
-                    }
-                }
-            }
-
-            Ok(None)
-        }
-
-        Err(solana_rpc_client_api::client_error::Error { kind, .. }) => {
-            match kind {
-                ErrorKind::SerdeJson(_) => Ok(None),
-                ErrorKind::RpcError(err) => {
-                    match err {
-                        RpcError::RpcResponseError { code, message, .. } => {
-                            match code {
-                                -32005 => {
-                                    tracing::error!("Node is unhealthy: {:?}", message);
-                                    Err(Custom(message))
-                                }
-                                -32011 => panic!("{:?}", message),
-                                -32007 | -32009 => Ok(None), // Slot skipped
-                                -32004 => Ok(None),          // Block for slot not available
-                                _ => panic!("Unexpected RPC error: {:?}", message),
-                            }
-                        }
-                        _ => Ok(None),
-                    }
-                }
-                err => Err(Custom(format!(
-                    "Failed to load block transactions: {:?}",
-                    err
-                ))),
-            }
-        }
-    }
-}
-
-async fn load_transaction_with_retries(
-    client: ArcSolanaClient,
-    commitment: CommitmentLevel,
-    program_id: Pubkey,
-    signature: Signature,
-    tx_retries: usize,
-    retry_int: Duration,
-) -> ProgramResult<Option<EncodedConfirmedTransactionWithStatusMeta>> {
-    let mut retries_remaining = tx_retries;
-    loop {
-        match load_transaction(&client, program_id, signature, commitment).await {
-            Ok(res) => break Ok(res),
-            Err(err) => {
-                tracing::info!("Failed to load transaction {:?}: {:?}", signature, err);
-                retries_remaining -= 1;
-
-                if retries_remaining > 0 {
-                    tokio::time::sleep(retry_int).await;
-                    continue;
-                } else {
-                    break Err(Custom(format!("Retries exhausted {:?}", signature)));
+        if let Some(vt) = tx.transaction.transaction.decode() {
+            let accounts = vt.message.static_account_keys();
+            for instruction in vt.message.instructions() {
+                if accounts[instruction.program_id_index as usize] == program_id {
+                    return Ok(Some(tx));
                 }
             }
         }
     }
+
+    Ok(None)
 }
 
 async fn load_transactions(
@@ -131,13 +76,8 @@ async fn load_transactions(
     retry_int: Duration,
 ) -> ProgramResult<Option<Vec<EncodedTransactionWithStatusMeta>>> {
     let futures = signatures.into_iter().map(|signature| {
-        load_transaction_with_retries(
-            client.clone(),
-            commitment,
-            program_id,
-            signature,
-            tx_retries,
-            retry_int,
+        load_transaction(
+            &client, program_id, signature, commitment, tx_retries, retry_int,
         )
     });
 
@@ -222,48 +162,36 @@ async fn load_block(
     commitment: CommitmentLevel,
     program_id: Pubkey,
     slot_number: Slot,
+    block_retries: usize,
     tx_retries: usize,
     retry_int: Duration,
 ) -> ProgramResult<Option<Arc<UiConfirmedBlock>>> {
-    match client
-        .get_block_with_config(
-            slot_number,
-            RpcBlockConfig {
-                encoding: Some(UiTransactionEncoding::Base58),
-                transaction_details: Some(TransactionDetails::Signatures),
-                rewards: None,
-                commitment: Some(CommitmentConfig { commitment }),
-                max_supported_transaction_version: Some(0),
-            },
-        )
-        .await
-    {
-        Ok(block) => Ok(Some(Arc::new(
-            load_block_transactions(client, program_id, block, commitment, tx_retries, retry_int)
+    Ok(
+        if let Some(block) = client
+            .get_block_with_config(
+                slot_number,
+                RpcBlockConfig {
+                    encoding: Some(UiTransactionEncoding::Base58),
+                    transaction_details: Some(TransactionDetails::Signatures),
+                    rewards: None,
+                    commitment: Some(CommitmentConfig { commitment }),
+                    max_supported_transaction_version: Some(0),
+                },
+                block_retries,
+                retry_int,
+            )
+            .await?
+        {
+            Some(Arc::new(
+                load_block_transactions(
+                    client, program_id, block, commitment, tx_retries, retry_int,
+                )
                 .await?,
-        ))),
-        Err(ClientError { request: _, kind }) => {
-            match kind {
-                ErrorKind::SerdeJson(_) => Ok(None),
-                ErrorKind::RpcError(err) => {
-                    match err {
-                        RpcError::RpcResponseError { code, message, .. } => {
-                            match code {
-                                -32005 => Err(Custom(message)),    // Node is unhealthy
-                                -32011 => panic!("{:?}", message), // Transaction history is not available from this node
-                                -32007 => Ok(None),
-                                -32009 => Err(Custom(message)), // Slot skipped
-                                -32004 => Err(Custom(message)), // Block for slot not available
-                                _ => Err(Custom(message)),
-                            }
-                        }
-                        _ => Ok(None),
-                    }
-                }
-                err => Err(Custom(format!("Failed to load block: {:?}", err))),
-            }
-        }
-    }
+            ))
+        } else {
+            None
+        },
+    )
 }
 
 impl SolanaBlockLoader {
@@ -271,51 +199,48 @@ impl SolanaBlockLoader {
         &self,
         mut slots: HashSet<Slot>,
     ) -> ProgramResult<BTreeMap<Slot, Arc<UiConfirmedBlock>>> {
-        let mut retries_remaining = self.block_retries;
-
-        let mut results = BTreeMap::new();
-        loop {
-            let futures = slots.iter().map(|slot_number| {
-                load_block(
-                    self.client.clone(),
-                    self.commitment,
-                    self.program_id,
-                    *slot_number,
-                    self.tx_retries,
-                    self.retry_int,
-                )
-            });
-
-            slots = slots
-                .iter()
-                .zip(futures_util::future::join_all(futures).await.into_iter())
-                .filter_map(|(slot, result)| match result {
-                    Err(err) => {
-                        tracing::info!("Failed to load block on slot {:?}: {:?}", slot, err);
-                        Some(*slot)
-                    }
-                    Ok(Some(block)) => {
-                        results.insert(*slot, block);
-                        None
-                    }
-                    _ => None,
-                })
-                .collect();
-
-            retries_remaining -= 1;
-            if !slots.is_empty() {
-                if retries_remaining > 0 {
-                    tokio::time::sleep(self.retry_int).await;
-                    continue;
-                } else {
-                    return Err(Custom("Failed to load blocks".to_string()));
-                }
-            } else {
-                break;
-            }
+        if slots.is_empty() {
+            tracing::warn!("No slots to load");
+            return Ok(BTreeMap::new());
         }
 
-        Ok(results)
+        let mut results = BTreeMap::new();
+        let futures = slots.iter().map(|slot_number| {
+            load_block(
+                self.client.clone(),
+                self.commitment,
+                self.program_id,
+                *slot_number,
+                self.block_retries,
+                self.tx_retries,
+                self.retry_int,
+            )
+        });
+
+        slots = slots
+            .iter()
+            .zip(futures_util::future::join_all(futures).await.into_iter())
+            .filter_map(|(slot, result)| match result {
+                Err(err) => {
+                    tracing::info!("Failed to load block on slot {:?}: {:?}", slot, err);
+                    Some(*slot)
+                }
+                Ok(Some(block)) => {
+                    results.insert(*slot, block);
+                    None
+                }
+                _ => None,
+            })
+            .collect();
+
+        if !slots.is_empty() {
+            Err(Custom(format!(
+                "Failed to load blocks on slots {:?}",
+                slots
+            )))
+        } else {
+            Ok(results)
+        }
     }
 
     async fn preload_blocks(
@@ -521,6 +446,7 @@ impl SolanaBlockLoader {
                     self.commitment,
                     self.program_id,
                     current_slot,
+                    self.block_retries,
                     self.tx_retries,
                     self.retry_int,
                 )
@@ -632,48 +558,44 @@ impl SolanaBlockLoader {
         block: &UiConfirmedBlock,
     ) -> ProgramResult<Option<Arc<UiConfirmedBlock>>> {
         let commitment = CommitmentLevel::Finalized;
-        let mut num_retries = self.block_retries;
-        loop {
-            match self
-                .client
-                .get_block_with_config(
-                    slot_number,
-                    RpcBlockConfig {
-                        encoding: Some(UiTransactionEncoding::Base58),
-                        transaction_details: None,
-                        rewards: None,
-                        commitment: Some(CommitmentConfig { commitment }),
-                        max_supported_transaction_version: Some(0),
-                    },
-                )
-                .await
-            {
-                Ok(finalized_block) => {
-                    return if finalized_block.blockhash != block.blockhash {
-                        load_block(
-                            self.client.clone(),
-                            commitment,
-                            self.program_id,
-                            slot_number,
-                            self.tx_retries,
-                            self.retry_int,
-                        )
-                        .await
-                    } else {
-                        Ok(None)
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!("Failed to recheck block {:?}: {:?}", slot_number, err);
-                }
-            };
 
-            if num_retries > 0 {
-                num_retries -= 1;
-                tokio::time::sleep(self.retry_int).await
-            } else {
-                return Err(Custom(format!("Failed to recheck block {:?}", slot_number)));
+        match self
+            .client
+            .get_block_with_config(
+                slot_number,
+                RpcBlockConfig {
+                    encoding: Some(UiTransactionEncoding::Base58),
+                    transaction_details: None,
+                    rewards: None,
+                    commitment: Some(CommitmentConfig { commitment }),
+                    max_supported_transaction_version: Some(0),
+                },
+                self.block_retries,
+                self.retry_int,
+            )
+            .await
+        {
+            Ok(Some(finalized_block)) => {
+                if finalized_block.blockhash != block.blockhash {
+                    load_block(
+                        self.client.clone(),
+                        commitment,
+                        self.program_id,
+                        slot_number,
+                        self.block_retries,
+                        self.tx_retries,
+                        self.retry_int,
+                    )
+                    .await
+                } else {
+                    Ok(None)
+                }
             }
+            Ok(None) => Ok(None),
+            Err(err) => Err(Custom(format!(
+                "Failed to recheck block {:?}: {:?}",
+                slot_number, err
+            ))),
         }
     }
 }

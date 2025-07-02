@@ -1,5 +1,5 @@
 use crate::error::{ProgramResult, RomeEvmError};
-use rome_solana::batch::{AdvanceTx, AtomicIxBatch, IxExecStepBatch};
+use rome_solana::batch::{AdvanceTx, AtomicIxBatch, IxExecStepBatch, TxVersion};
 use solana_sdk::signature::Keypair;
 use std::sync::Arc;
 
@@ -30,9 +30,18 @@ impl<'a> AdvanceTx<'a> for CrossRollupTx {
 
         self.complete = true;
 
-        Ok(IxExecStepBatch::Single(self.instructions.clone()))
+        Ok(IxExecStepBatch::Single(
+            self.instructions.clone(),
+            TxVersion::Legacy,
+        ))
     }
 
+    fn advance_with_version(
+        &mut self,
+        _: TxVersion,
+    ) -> Result<IxExecStepBatch<'static>, Self::Error> {
+        unreachable!()
+    }
     fn payer(&self) -> Arc<Keypair> {
         self.payer.clone()
     }

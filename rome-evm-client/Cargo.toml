@@ -8,7 +8,7 @@ single-state = ["rome-evm/single-state"]
 testnet = ["rome-evm/testnet"]
 mainnet = ["rome-evm/mainnet"]
 ci = ["rome-evm/ci"]
-default = []
+default = ["ci"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -43,7 +43,7 @@ solana-sdk = {workspace = true}
 solana-rpc-client-api = {workspace = true}
 solana-transaction-status = {workspace = true}
 
-rome-evm = { workspace = true } 
+rome-evm = { workspace = true, default-features = false }
 rome-utils = { workspace = true }
 rome-solana = { workspace = true }
 rome-geth = { workspace = true }

@@ -1,3 +1,4 @@
+use crate::error::ProgramResult;
 use async_trait::async_trait;
 use solana_program::clock::Slot;
 use solana_program::pubkey::Pubkey;
@@ -22,7 +23,9 @@ pub trait SolanaClient: Send + Sync {
         &self,
         signature: &Signature,
         config: RpcTransactionConfig,
-    ) -> ClientResult<EncodedConfirmedTransactionWithStatusMeta>;
+        num_retries: usize,
+        retry_delay: std::time::Duration,
+    ) -> ProgramResult<Option<EncodedConfirmedTransactionWithStatusMeta>>;
 
     async fn get_signatures_for_address_with_config(
         &self,
@@ -34,7 +37,9 @@ pub trait SolanaClient: Send + Sync {
         &self,
         slot: Slot,
         config: RpcBlockConfig,
-    ) -> ClientResult<UiConfirmedBlock>;
+        num_retries: usize,
+        retry_delay: std::time::Duration,
+    ) -> ProgramResult<Option<UiConfirmedBlock>>;
 
     async fn get_slot_with_commitment(
         &self,

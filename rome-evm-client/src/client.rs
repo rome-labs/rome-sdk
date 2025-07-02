@@ -9,11 +9,11 @@ use crate::indexer::{
 };
 use crate::indexer::{BlockType, EthereumBlockStorage, ProducerParams};
 use crate::indexer::{RollupIndexer, SolanaBlockLoader, SolanaBlockStorage, StandaloneIndexer};
-use crate::tx::TxBuilder;
-use crate::util::{check_exit_reason, RomeEvmUtil};
+use crate::tx::{Iterable, TxBuilder};
+use crate::util::{check_accounts_len, check_exit_reason, RomeEvmUtil};
 use crate::Payer;
 use async_trait::async_trait;
-use emulator::{Emulation, Instruction};
+use emulator::Emulation;
 use ethers::types::{
     Address, BlockId, BlockNumber, Bytes, FeeHistory, Transaction as EthTransaction,
     TransactionReceipt, TransactionRequest, TxHash, H256, U256, U64,
@@ -28,6 +28,7 @@ use solana_sdk::{
     pubkey::Pubkey,
     signer::{keypair::Keypair, Signer},
     transaction::Transaction,
+    instruction::Instruction
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -38,6 +39,9 @@ use tokio::{sync::oneshot, task::JoinHandle};
 const BLOCK_RETRIES: usize = 10;
 const TX_RETRIES: usize = 10;
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
+const INDEXING_INTERVAL_MS: u64 = 400;
+const MAX_FEE_HISTORY_BLOCKS: u64 = 1000;
+const BASE_FEE_PER_GAS: u64 = 1000;
 
 /// Client component interacting with the instance of Rome-EVM smart-contract on Solana blockchain
 ///
@@ -56,8 +60,6 @@ pub struct RomeEVMClient {
 
     gas_price: U256,
 }
-
-const INDEXING_INTERVAL_MS: u64 = 400;
 
 #[derive(Clone)]
 struct DummyBlockProducer {
@@ -192,26 +194,56 @@ impl RomeEVMClient {
 
         StandaloneIndexer {
             solana_block_loader: Some(solana_block_loader),
-            rollup_indexer,
+            rollup_indexer: Some(rollup_indexer),
         }
         .start_indexing(start_slot, idx_started_oneshot, INDEXING_INTERVAL_MS)
     }
 
+    /// Emulates a raw transaction using full set of resources
+    ///
+    /// * `rlp` - signed rlp bytes for the transaction to be emulated
+    ///
+    /// Returns tuple (<transaction_hash>, <AdvanceTx>)
+    pub async fn prepare_transaction(&self, rlp: Bytes) -> ProgramResult<(TxHash, Iterable)> {
+        let hash: TxHash = keccak256(rlp.as_ref()).into();
+        Ok((hash, self.tx_builder.build_tx(rlp, hash).await?))
+    }
+
     /// Executes transaction in a Rollup smart-contract
     ///
-    /// * `tx_request` - Transaction request object to execute
-    /// * `eth_signature` - Signature of a transaction
+    /// * `rlp` - rlp of transaction
     ///
     /// Returns transaction hash or error if transaction can not be executed
     pub async fn send_transaction(&self, rlp: Bytes) -> ProgramResult<TxHash> {
-        let hash: TxHash = keccak256(rlp.as_ref()).into();
-
-        let mut tx = self.tx_builder.build_tx(rlp, hash).await?;
+        let (hash, mut tx) = self.prepare_transaction(rlp).await?;
 
         self.solana
             .send_and_confirm_tx_iterable(&mut *tx)
             .await
-            .map_err(|err| RomeEvmError::Custom(err.to_string()))?;
+            .map_err(|err| Custom(err.to_string()))?;
+
+        Ok(hash)
+    }
+    /// Executes transaction consisting of rome-evm instruction and SVM-instructions
+    ///
+    /// * `rlp` - rlp of rome-evm transaction
+    /// * `svm` - SVM-instructions
+    /// * `alt_keys` - pubkeys of address lookup tables 
+    ///
+    /// Returns transaction hash or error if transaction can not be executed
+    pub async fn send_composite_transaction(
+        &self, 
+        rlp: Bytes,
+        svm: Vec<Instruction>,
+        alt_keys: Option<Vec<Pubkey>>,
+    ) -> ProgramResult<TxHash> {
+        let hash: TxHash = keccak256(rlp.as_ref()).into();
+        let mut tx = self.tx_builder.build_svm_tx(rlp, svm, alt_keys).await?;
+
+        self.solana
+            .send_and_confirm_tx_iterable(&mut *tx)
+            .await
+            .map_err(|err| Custom(err.to_string()))?;
 
         Ok(hash)
     }
@@ -293,6 +325,7 @@ impl RomeEVMClient {
             self.sync_rpc_client(),
         )?;
         check_exit_reason(&emulation)?;
+        check_accounts_len(&emulation)?;
 
         Ok(emulation.gas.into())
     }
@@ -328,20 +361,26 @@ impl RomeEVMClient {
         block_number: BlockId,
         reward_percentiles: Vec<f64>,
     ) -> ProgramResult<FeeHistory> {
+        let count = count.min(MAX_FEE_HISTORY_BLOCKS);
         if let Some(block_number) = self.get_block_number(block_number).await? {
-            let base_fee_per_gas = vec![U256::from(1000); count as usize];
+            let block_number = block_number.as_u64();
+            let base_fee_per_gas = vec![U256::from(BASE_FEE_PER_GAS); count as usize];
             let gas_used_ratio = vec![0.5; count as usize];
-            let oldest_block = U256::from(block_number.as_u64() - count);
-            let rewards = reward_percentiles
-                .iter()
-                .map(|&percentile| U256::from(percentile as u64))
-                .collect::<Vec<U256>>();
+            let oldest_block = U256::from(block_number.saturating_sub(count));
+
+            let rewards = vec![
+                reward_percentiles
+                    .iter()
+                    .map(|&p| U256::from(p as u64))
+                    .collect::<Vec<U256>>();
+                count as usize
+            ];
 
             Ok(FeeHistory {
                 base_fee_per_gas,
                 gas_used_ratio,
                 oldest_block,
-                reward: vec![rewards],
+                reward: rewards,
             })
         } else {
             Err(RomeEvmError::Custom("Indexer is not started".to_string()))
@@ -391,6 +430,23 @@ impl RomeEVMClient {
         }
     }
 
+    /// Emulates a raw transaction using rome-evm emulator
+    ///
+    /// * `rlp` - signed rlp bytes for the transaction to be emulated
+    /// * `pkey` - solana public key of the payer account
+    ///
+    /// Returns the list of accounts from emulation report
+    pub async fn emulate_tx(&self, rlp: Bytes, pkey: Pubkey) -> ProgramResult<Vec<Pubkey>> {
+        let mut data = vec![0];
+        data.extend_from_slice(&rlp);
+
+        let emulation = self.emulate(emulator::Instruction::DoTx, &data, &pkey)?;
+        check_exit_reason(&emulation)?;
+        check_accounts_len(&emulation)?;
+
+        Ok(emulation.accounts.keys().cloned().collect())
+    }
+
     /// Runs emulation of a given transaction request on a latest block with commitment level
     /// configured during client construction.
     ///
@@ -400,7 +456,7 @@ impl RomeEVMClient {
     /// Returns result of emulation
     pub fn emulate(
         &self,
-        instruction: Instruction,
+        instruction: emulator::Instruction,
         data: &[u8],
         payer: &Pubkey,
     ) -> ProgramResult<Emulation> {
@@ -479,7 +535,7 @@ impl RomeEVMClient {
     ///
     /// This solana transaction must be signed by solana user's wallet private key.
     pub async fn deposit(&self, rlp: &[u8], keypair: &Keypair) -> ProgramResult<()> {
-        let mut data = vec![Instruction::Deposit as u8];
+        let mut data = vec![emulator::Instruction::Deposit as u8];
         data.extend(self.chain_id().to_le_bytes());
         data.extend(rlp);
 
@@ -505,8 +561,12 @@ impl RomeEVMClient {
 
     /// Instruction is used to registry rollup owner.
     /// This private instruction must be signed with the registry-authority keypair
-    pub async fn reg_owner(&self, chain_id: u64, registry_authority: &Keypair) -> ProgramResult<()> {
-        let mut data = vec![Instruction::RegOwner as u8];
+    pub async fn reg_owner(
+        &self,
+        chain_id: u64,
+        registry_authority: &Keypair,
+    ) -> ProgramResult<()> {
+        let mut data = vec![emulator::Instruction::RegOwner as u8];
         data.extend(chain_id.to_le_bytes());
 
         let emulation = emulator::emulate(

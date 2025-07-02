@@ -7,7 +7,7 @@ use rome_evm_client::rome_evm::H160 as EvmH160;
 use rome_evm_client::tx::CrossChainTx;
 use rome_evm_client::tx::CrossRollupTx;
 use rome_evm_client::tx::TxBuilder;
-use rome_evm_client::util::{check_exit_reason, RomeEvmUtil};
+use rome_evm_client::util::{check_accounts_len, check_exit_reason, RomeEvmUtil};
 use rome_evm_client::Resource;
 use rome_evm_client::{emulator, resources::Payer};
 use rome_solana::batch::AdvanceTx;
@@ -161,12 +161,13 @@ impl Rome {
         )?;
 
         check_exit_reason(&emulation)?;
+        check_accounts_len(&emulation)?;
 
         Ok(emulation.gas.into())
     }
 
     /// Compose a simple rollup transaction
-    pub async fn compose_rollup_tx<'a>(&self, tx: RheaTx<'a>) -> ProgramResult<RomeTx> {
+    pub async fn compose_rollup_tx<'a>(&self, tx: RheaTx<'a>) -> ProgramResult<RomeTx<'a>> {
         println!("\nCompose rollup tx\n");
         println!("Transaction {:?}", tx.tx());
 
@@ -189,7 +190,7 @@ impl Rome {
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
             ComputeBudgetInstruction::request_heap_frame(256 * 1024),
         ];
-        let mut resource: Option<Resource> = None;
+        let mut resource: Option<Arc<Resource>> = None;
 
         for tx in _tx.iter() {
             println!("Transaction {:?}", tx);
@@ -240,7 +241,7 @@ impl Rome {
             ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
             ComputeBudgetInstruction::request_heap_frame(256 * 1024),
         ];
-        let mut resource: Option<Resource> = None;
+        let mut resource: Option<Arc<Resource>> = None;
 
         for tx in romulus_tx.eth_txs().iter() {
             println!("Eth Transaction {:?}", tx);

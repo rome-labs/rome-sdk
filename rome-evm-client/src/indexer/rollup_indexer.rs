@@ -10,7 +10,7 @@ use solana_sdk::clock::Slot;
 use std::collections::BTreeMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 use tokio::task::JoinHandle;
 use tokio::{sync::RwLock, time::Duration};
 
@@ -211,20 +211,24 @@ impl RollupIndexer {
     ) -> ProgramResult<()> {
         tracing::info!("Starting RollupIndexer from slot {from_slot}");
         loop {
-            from_slot = tokio::select! {
-                // Either continue parsing from latest slot of previous iteration
-                res = self.restore_or_produce_until_in_sync(from_slot, interval, batch_size) => { res }
-
-                // Or re-parse blocks after reorg happened
-                res = reorg_event_rx.recv() => {
-                    if let Some(res) = res {
-                        self.ethereum_block_storage.clean_from_slot(res).await?;
-                        Ok(res)
-                    } else {
+            from_slot = match reorg_event_rx.try_recv() {
+                Ok(reorg_slot) => {
+                    tracing::warn!("Reorg event received, cleaning from slot {reorg_slot}");
+                    self.ethereum_block_storage
+                        .clean_from_slot(reorg_slot)
+                        .await?;
+                    Ok(reorg_slot)
+                }
+                Err(err) => match err {
+                    TryRecvError::Empty => {
+                        self.restore_or_produce_until_in_sync(from_slot, interval, batch_size)
+                            .await
+                    }
+                    TryRecvError::Disconnected => {
                         tracing::info!("Reorg event channel closed, exiting RollupIndexer");
                         break Ok(());
                     }
-                }
+                },
             }?;
         }
     }

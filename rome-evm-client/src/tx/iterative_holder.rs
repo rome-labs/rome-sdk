@@ -1,15 +1,12 @@
-use rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch};
-
-use super::{builder::TxBuilder, utils::MULTIPLE_ITERATIONS, TransmitTx};
-use crate::{
-    error::{ProgramResult, RomeEvmError},
-    Resource,
+use {
+    super::{iterative::advance_with_version_it, TransmitTx, MULTIPLE_ITERATIONS},
+    crate::error::{ProgramResult, RomeEvmError},
+    async_trait::async_trait,
+    emulator::Emulation,
+    rome_solana::batch::{AdvanceTx, IxExecStepBatch, OwnedAtomicIxBatch, TxVersion},
+    solana_sdk::signature::Keypair,
+    std::sync::Arc,
 };
-use async_trait::async_trait;
-use emulator::Emulation;
-use ethers::types::{Bytes, TxHash};
-use solana_sdk::signature::Keypair;
-use std::sync::Arc;
 
 pub struct IterativeTxHolder {
     transmit_tx: TransmitTx,
@@ -21,14 +18,19 @@ enum Steps {
     Transmit,
     Execute,
     Confirm,
-    Complete,
+    End,
 }
 impl IterativeTxHolder {
-    pub fn new(tx_builder: TxBuilder, resource: Resource, rlp: Bytes, hash: TxHash) -> Self {
-        let transmit_tx = TransmitTx::new(tx_builder, resource, rlp, hash);
+    pub fn new(transmit_tx: TransmitTx, use_alt: bool) -> Self {
+        let step = if use_alt {
+            Steps::Execute
+        } else {
+            Steps::Transmit
+        };
+
         Self {
             transmit_tx,
-            step: Steps::Transmit,
+            step,
             session: rand::random(),
         }
     }
@@ -83,7 +85,7 @@ impl IterativeTxHolder {
 impl AdvanceTx<'_> for IterativeTxHolder {
     type Error = RomeEvmError;
     fn advance(&mut self) -> ProgramResult<IxExecStepBatch<'static>> {
-        match &self.step {
+        match &mut self.step {
             Steps::Transmit => {
                 let ix = self.transmit_tx.advance();
 
@@ -98,10 +100,10 @@ impl AdvanceTx<'_> for IterativeTxHolder {
                 self.step = Steps::Confirm;
                 let ixs = self.ixs()?;
 
-                Ok(IxExecStepBatch::ParallelUnchecked(ixs))
+                Ok(IxExecStepBatch::ParallelUnchecked(ixs, TxVersion::Legacy))
             }
             Steps::Confirm => {
-                self.step = Steps::Complete;
+                self.step = Steps::End;
 
                 match self.transmit_tx.tx_builder.confirm_tx_iterative(
                     self.transmit_tx.resource.holder_index(),
@@ -123,6 +125,7 @@ impl AdvanceTx<'_> for IterativeTxHolder {
             _ => Ok(IxExecStepBatch::End),
         }
     }
+    advance_with_version_it!();
     fn payer(&self) -> Arc<Keypair> {
         self.transmit_tx.payer()
     }

@@ -10,6 +10,8 @@ pub const ENABLE_OTEL_TRACING_ENV: &str = "ENABLE_OTEL_TRACING";
 pub const ENABLE_OTEL_METRICS_ENV: &str = "ENABLE_OTEL_METRICS";
 /// Environment variable to enable stdout logging.
 pub const ENABLE_STDOUT_LOGGING_ENV: &str = "ENABLE_STDOUT_LOGGING";
+/// Environment variable to accept queue size for otel tracing.
+pub const OTEL_TRACING_QUEUE_SIZE: &str = "OTEL_TRACING_QUEUE_SIZE";
 
 /// Set of utility functions to parse environment variables for OpenTelemetry configuration.
 pub struct OtelEnv;
@@ -61,5 +63,18 @@ impl OtelEnv {
         };
 
         Ok(value)
+    }
+
+    /// Parse [OTEL_TRACING_QUEUE_SIZE] environment variable to a [usize].
+    pub fn tracing_queue_size() -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(std::env::var(OTEL_TRACING_QUEUE_SIZE)
+            .map_err(|_| format!("{} must be set", OTEL_TRACING_QUEUE_SIZE))?
+            .parse::<usize>()
+            .map_err(|_| {
+                format!(
+                    "{} must be a valid unsigned integer",
+                    OTEL_TRACING_QUEUE_SIZE
+                )
+            })?)
     }
 }
