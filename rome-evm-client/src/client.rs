@@ -33,6 +33,7 @@ use solana_sdk::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use solana_program::instruction::AccountMeta;
 use tokio::sync::RwLock;
 use tokio::{sync::oneshot, task::JoinHandle};
 
@@ -436,7 +437,7 @@ impl RomeEVMClient {
     /// * `pkey` - solana public key of the payer account
     ///
     /// Returns the list of accounts from emulation report
-    pub async fn emulate_tx(&self, rlp: Bytes, pkey: Pubkey) -> ProgramResult<Vec<Pubkey>> {
+    pub async fn emulate_tx(&self, rlp: Bytes, pkey: Pubkey) -> ProgramResult<Vec<AccountMeta>> {
         let mut data = vec![0];
         data.extend_from_slice(&rlp);
 
@@ -444,7 +445,11 @@ impl RomeEVMClient {
         check_exit_reason(&emulation)?;
         check_accounts_len(&emulation)?;
 
-        Ok(emulation.accounts.keys().cloned().collect())
+        Ok(emulation.accounts.iter().map(|(pubkey, acc)| AccountMeta {
+            pubkey: *pubkey,
+            is_signer: acc.signer,
+            is_writable: acc.account.writable,
+        }).collect())
     }
 
     /// Runs emulation of a given transaction request on a latest block with commitment level

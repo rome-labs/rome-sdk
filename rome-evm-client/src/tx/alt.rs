@@ -17,6 +17,9 @@ use {
     std::sync::Arc,
 };
 
+const ALT_CHUNK_SIZE: usize = 24;  // number of pubkeys per tx to extend ALT
+const RECENT_SLOT_OFFSET: u64  = 5;  // recent slot must be presented in SLOT_HASHES account
+
 #[derive(Clone)]
 enum Steps {
     Execute,
@@ -40,7 +43,7 @@ impl AltTx {
         resource: Arc<Resource>,
         keys: Vec<Pubkey>,
     ) -> ProgramResult<Self> {
-        let recent_slot = tx_builder.client_cloned().get_slot()? - 5;
+        let recent_slot = tx_builder.client_cloned().get_slot()? - RECENT_SLOT_OFFSET;
 
         Ok(Self {
             tx_builder,
@@ -54,8 +57,9 @@ impl AltTx {
     }
     pub fn tx_data_alloc(&mut self) -> Vec<Vec<u8>> {
         let keys = self.keys.take().expect("accounts expected");
+        let total = keys.len() as u64;
 
-        let keys_bin = into_chunks(keys, 25)
+        let keys_bin = into_chunks(keys, ALT_CHUNK_SIZE)
             .into_iter()
             .map(|chunk| {
                 chunk
@@ -71,6 +75,7 @@ impl AltTx {
         data.extend(self.tx_builder.chain_id.to_le_bytes());
         data.extend(self.session.to_le_bytes());
         data.extend(self.recent_slot.to_le_bytes());
+        data.extend(total.to_le_bytes());
 
         keys_bin
             .into_iter()
