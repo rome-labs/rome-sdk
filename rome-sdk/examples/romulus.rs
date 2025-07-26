@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use rome_sdk::{Rome, RomeConfig, RomulusTx};
 
-const CHAIN_ID_FIRST: u64 = 200003;
-const CHAIN_ID_SECOND: u64 = 200004;
+const CHAIN_ID_FIRST: u64 = 121212;
+const CHAIN_ID_SECOND: u64 = 121213;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

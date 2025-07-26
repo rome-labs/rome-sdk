@@ -1850,6 +1850,7 @@ dependencies = [
  "rome-evm",
  "solana-client",
  "solana-program",
+ "solana-system-interface",
  "spl-associated-token-account 6.0.0",
  "spl-token 7.0.0",
 ]
@@ -5310,6 +5311,7 @@ dependencies = [
  "solana-bn254",
  "solana-client",
  "solana-program",
+ "solana-system-interface",
  "spl-associated-token-account 6.0.0",
  "spl-token 7.0.0",
  "thiserror 1.0.69",
@@ -7098,6 +7100,22 @@ dependencies = [
  "tokio",
  "tokio-util",
  "x509-parser",
+]
+
+[[package]]
+name = "solana-system-interface"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94d7c18cb1a91c6be5f5a8ac9276a1d7c737e39a21beba9ea710ab4b9c63bc90"
+dependencies = [
+ "js-sys",
+ "num-traits",
+ "serde",
+ "serde_derive",
+ "solana-decode-error",
+ "solana-instruction",
+ "solana-pubkey",
+ "wasm-bindgen",
 ]
 
 [[package]]
